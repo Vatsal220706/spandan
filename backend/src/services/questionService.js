@@ -397,32 +397,53 @@ export function parseOptions(options, type) {
 
 // MiniMax API call
 async function generateWithMiniMax(prompt) {
-  const response = await fetch('https://api.minimax.io/v1/text/chatcompletion_v2', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.minimaxApiKey}`
-    },
-    body: JSON.stringify({
-      model: 'MiniMax-M2.7',
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.7,
-      max_tokens: 8000
-    })
-  })
+  const apiKey = config.minimaxApiKey
+  const isSamagamaKey = apiKey.startsWith('sk_live_')
 
+  // samagama.in keys use https://api.vicharanashala.ai/v1/chat/completions with model 'minimaxm27'
+  const url = isSamagamaKey
+    ? 'https://api.vicharanashala.ai/v1/chat/completions'
+    : 'https://api.minimax.io/v1/text/chatcompletion_v2'
+  const modelName = isSamagamaKey ? 'minimaxm27' : 'MiniMax-M2.7'
+
+  // Headers: Send both Authorization: Bearer and x-api-key for maximum compatibility
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    'x-api-key': apiKey
+  }
+
+  let response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_tokens: 8000
+      })
+    })
+  } catch (err) {
+    throw new Error(`Samagama Gateway connection error: ${err.message}`)
+  }
 
   if (!response.ok) {
-    const errorData = await response.text()
-    throw new Error(`MiniMax API error: ${response.status} - ${errorData}`)
+    const errorText = await response.text().catch(() => '')
+    if (response.status === 502) {
+      throw new Error(`Samagama Gateway Error (502 Bad Gateway): The LLM server at api.vicharanashala.ai is currently under maintenance or restarting. Please try again in a few minutes.`)
+    }
+    throw new Error(`API Gateway error (${response.status}): ${errorText.substring(0, 300)}`)
   }
 
   const data = await response.json()
+
+  // Check for MiniMax base_resp error response (official endpoint format)
+  if (data.base_resp && data.base_resp.status_code && data.base_resp.status_code !== 0) {
+    throw new Error(`MiniMax API error (${data.base_resp.status_code}): ${data.base_resp.status_msg}`)
+  }
+
   const choice = data.choices?.[0]
   const content = choice?.message?.content || ''
   const reasoning = choice?.message?.reasoning_content || ''
@@ -435,7 +456,7 @@ async function generateWithMiniMax(prompt) {
   const text = content || reasoning
   if (!text) {
     console.error('[gen:minimax] EMPTY response (no content, no reasoning). finish=' + finish +
-      ' raw choice: ' + JSON.stringify(choice).slice(0, 1500))
+      ' raw choice: ' + (JSON.stringify(choice || {})).slice(0, 1500))
   } else if (!content && reasoning) {
     console.warn(`[gen:minimax] content empty — falling back to reasoning_content (${reasoning.length} chars)`)
   }
@@ -504,7 +525,7 @@ async function generateWithAnthropic(prompt, model = 'claude-sonnet-4-20250514')
 }
 
 // Google Gemini API call
-async function generateWithGoogle(prompt, model = 'gemini-2.0-flash') {
+async function generateWithGoogle(prompt, model = 'gemini-3.6-flash') {
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.googleApiKey}`, {
     method: 'POST',
     headers: {
