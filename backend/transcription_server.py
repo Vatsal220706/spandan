@@ -25,7 +25,7 @@ from faster_whisper import WhisperModel
 # Configuration (env-overridable)
 HOST = os.environ.get("TRANSCRIPTION_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TRANSCRIPTION_PORT", "3003"))
-MODEL_SIZE = os.environ.get("TRANSCRIPTION_MODEL", "base")
+MODEL_SIZE = os.environ.get("TRANSCRIPTION_MODEL", "small.en")
 COMPUTE_TYPE = os.environ.get("TRANSCRIPTION_COMPUTE", "int8")  # int8 = CPU-efficient
 DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")          # set "cuda" on a GPU box
 
@@ -71,7 +71,10 @@ def transcribe_audio(audio_base64: str, sample_rate: int = 16000) -> dict:
                 audio_float32,
                 language="en",
                 beam_size=5,
-                vad_filter=False,  # keep all audio, including pauses
+                vad_filter=True,  # Filter out silence/noise to prevent hallucinations
+                vad_parameters=dict(min_silence_duration_ms=500),
+                condition_on_previous_text=False,
+                initial_prompt="This is a live lecture audio transcription.",
             )
             # segments is a generator; materialize inside the lock.
             full_text = ""

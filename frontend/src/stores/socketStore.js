@@ -46,7 +46,13 @@ export const useSocketStore = create((set, get) => ({
     })
 
     socket.on('authenticated', (data) => {
-      if (!data.success) {
+      if (data.success) {
+        // Upon successful authentication, re-join room if one was active
+        const { joinedRoom } = get()
+        if (joinedRoom?.roomCode) {
+          socket.emit('room:join', { roomCode: joinedRoom.roomCode, userId: joinedRoom.userId })
+        }
+      } else {
         console.error('Socket authentication failed:', data.error)
         // A token that expired mid-session fails socket re-auth too (server sends expired:true). Treat
         // it like an HTTP 401 so the user is sent to re-login instead of sitting on a silently

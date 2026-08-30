@@ -1,3 +1,6 @@
+import dns from 'dns'
+dns.setServers(['8.8.8.8', '8.8.4.4'])
+
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
@@ -555,8 +558,16 @@ io.on('connection', (socket) => {
   // Join room — identity is taken from the AUTHENTICATED socket, not the client payload
   // (so a client can't join/register as another user).
   socket.on('room:join', async ({ roomCode }) => {
-    const userId = socket.data?.userId
-    const role = socket.data?.role
+    let userId = socket.data?.userId
+    let role = socket.data?.role
+    // Fallback: If socket.data.userId is not yet set (race condition during connect), resolve from handshake token
+    if (!userId && socket.handshake?.auth?.token) {
+      try {
+        await authenticateSocket(socket, socket.handshake.auth.token)
+        userId = socket.data?.userId
+        role = socket.data?.role
+      } catch (e) { /* ignore */ }
+    }
     if (!userId) { socket.emit('room:error', { error: 'Not authenticated' }); return }
     // Token this socket authenticated with has since lapsed — refuse the join and tell the client to
     // re-login rather than trusting the userId cached at connect time.

@@ -172,9 +172,15 @@ function StudentRoomPage() {
     // Self-heal after a socket reconnect: the store re-joins the room automatically, but a
     // question pushed WHILE we were briefly disconnected would have been missed. Re-pull the
     // room's questions so any missed one surfaces without the student manually refreshing.
-    const handleReconnect = () => {
+    const handleReconnect = async () => {
       if (room?._id && user?._id) {
         fetchPastResponses(room._id, user._id)
+        try {
+          const freshRoom = await joinRoomByCode(roomCode)
+          if (freshRoom?.currentQuestion && !freshRoom.endedAt) {
+            handleNewQuestion(freshRoom.currentQuestion)
+          }
+        } catch (e) { /* non-fatal */ }
       }
     }
 
@@ -222,6 +228,12 @@ function StudentRoomPage() {
     try {
       const roomData = await joinRoomByCode(roomCode)
       setRoom(roomData)
+
+      // If room has an active live question, show it immediately on join/reconnect!
+      if (roomData?.currentQuestion && !roomData.endedAt) {
+        handleNewQuestion(roomData.currentQuestion)
+      }
+
       if (user?._id && socket) {
         // Join via socket - room:joined confirms the student was added to RoomMember
         return new Promise((resolve, reject) => {
