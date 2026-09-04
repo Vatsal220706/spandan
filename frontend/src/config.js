@@ -5,3 +5,5 @@ const BASE_PATH = import.meta.env.VITE_BASE_PATH || ''
 
 export const API_URL = BASE_PATH + '/api'
 export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || window.location.origin
+// Socket.IO path: '/socket.io' in local dev, '/spandan/socket.io' in production
+export const SOCKET_PATH = BASE_PATH ? '/' + BASE_PATH.replace(/^\//, '') + '/socket.io' : '/socket.io'
