@@ -12,6 +12,7 @@ import TextQuestionApprovalPopup from '../components/TextQuestionApprovalPopup'
 import CreateQuestionOverlay from '../components/CreateQuestionOverlay'
 import TextToQuestionsPopup from '../components/TextToQuestionsPopup'
 import RoomSettingsModal from '../components/RoomSettingsModal'
+import MultiAgentQuestionPopup from '../components/MultiAgentQuestionPopup'
 import Leaderboard from '../components/Leaderboard'
 import ErrorBoundary from '../components/ErrorBoundary'
 import YouTubeVideo, { extractYouTubeId } from '../components/YouTubeVideo'
@@ -19,6 +20,7 @@ import useIsMobile from '../hooks/useIsMobile'
 import { saveTranscript } from '../services/transcriptService'
 import { transcribeAudio, getTranscriptionStatus, convertWebMToWav } from '../services/serverTranscriptionService'
 import { requestQuestionGeneration, fetchAllRoomQuestions } from '../services/questionService'
+import { requestMultiAgentGeneration } from '../services/multiAgentService'
 import { API_URL } from '../config.js'
 
 function RoomDetailPage() {
@@ -93,6 +95,10 @@ function RoomDetailPage() {
   const [showGeneratingPopup, setShowGeneratingPopup] = useState(false)
   const [pendingTextQuestions, setPendingTextQuestions] = useState([])
   const [generatedQuestions, setGeneratedQuestions] = useState([])
+  // Multi-Agent state
+  const [showMultiAgentPopup, setShowMultiAgentPopup] = useState(false)
+  const [multiAgentResults, setMultiAgentResults] = useState(null)
+  const [isMultiAgentGenerating, setIsMultiAgentGenerating] = useState(false)
   // Segment pause/resume state
   const [isSegmentPaused, setIsSegmentPaused] = useState(false)
   const [segmentTimerValue, setSegmentTimerValue] = useState(0) // frozen value when paused
@@ -106,7 +112,9 @@ function RoomDetailPage() {
     questionProvider: 'minimax',
     questionTypeMix: { MCQ: 0, TF: 100, MSQ: 0 },
     timeToAnswer: 30,
-    points: 100
+    points: 100,
+    multiAgentEnabled: false,
+    activeAgents: ['agent_1', 'agent_2', 'agent_3']
   })
   const [totalParticipants, setTotalParticipants] = useState(0)
   const [answerCounts, setAnswerCounts] = useState({}) // questionId -> count
@@ -369,6 +377,23 @@ function RoomDetailPage() {
     // Auto-generate questions FIRST. The transcript save is intentionally NOT done before this and
     // never gates generation — a failed/hung transcript POST used to abort the whole segment with no
     // questions. We save the transcript only after questions are produced (below), fire-and-forget.
+
+    // --- Multi-Agent branch ---
+    if (roomSettings.multiAgentEnabled) {
+      try {
+        console.log('[SEGMENT] Multi-agent generation...')
+        await handleMultiAgentGenerate(textToUse, 'segment')
+        saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
+          .catch((err) => console.error('[SEGMENT] Failed to save transcript:', err))
+      } catch (error) {
+        console.error('[SEGMENT] Multi-agent generation failed:', error)
+        window.alert('Multi-agent generation failed. You can use the manual "Generate Q" button.')
+        setGenerateQEnabled(true)
+      }
+      return
+    }
+
+    // --- Single-agent branch (existing) ---
     let generated = null
     try {
       console.log('[SEGMENT] Auto-generating questions...')
@@ -436,6 +461,24 @@ function RoomDetailPage() {
     setIsGeneratingFromText(true)
 
     try {
+      // --- Multi-Agent branch for paste flow ---
+      if (roomSettings.multiAgentEnabled) {
+        setShowGeneratingPopup(false)
+        try {
+          await handleMultiAgentGenerate(text, 'paste')
+          saveTranscript(room._id, -1, text, 0, 'paste')
+            .catch((err) => console.error('[PASTE] Failed to save transcript:', err))
+        } catch (error) {
+          console.error('[PASTE] Multi-agent generation failed:', error)
+          setPastedText(text)
+          setShowTextToQuestions(true)
+          window.alert('Multi-agent generation failed: ' + error.message)
+        }
+        setIsGeneratingFromText(false)
+        return
+      }
+
+      // --- Single-agent branch (existing) ---
       const typeMix = mode === 'TF'
         ? { MCQ: 0, TF: 100, MSQ: 0 }
         : (roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 })
@@ -1017,6 +1060,78 @@ function RoomDetailPage() {
     segmentTranscriptRef.current = ''
   }
 
+  // --- Multi-Agent generation handler (shared by segment, paste, and manual flows) ---
+  const handleMultiAgentGenerate = async (text, source = 'segment') => {
+    setIsMultiAgentGenerating(true)
+    setShowGeneratingPopup(true)
+
+    try {
+      const result = await requestMultiAgentGeneration(text, {
+        numQuestions: 1, // 1 question per agent for comparison
+        difficulty: roomSettings.difficulty,
+        questionTypeMix: roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 },
+        agents: roomSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
+      })
+
+      setShowGeneratingPopup(false)
+      setIsMultiAgentGenerating(false)
+
+      if (result.success && result.agentResults) {
+        setMultiAgentResults(result.agentResults)
+        setShowMultiAgentPopup(true)
+        setIsPopupOpen(true)
+      } else {
+        throw new Error(result.error || 'No results returned')
+      }
+    } catch (error) {
+      setShowGeneratingPopup(false)
+      setIsMultiAgentGenerating(false)
+      throw error // let the caller handle UI fallback
+    }
+  }
+
+  // --- Multi-Agent approve: save selected question + launch to students ---
+  const handleMultiAgentApprove = async (question, agentInfo) => {
+    try {
+      const response = await fetch(`${API_URL}/questions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          roomId: room._id,
+          type: question.type,
+          question: question.question,
+          options: question.options,
+          explanation: question.explanation,
+          segmentIndex: question.segmentIndex || currentSegment,
+          timeToAnswer: question.timeToAnswer || roomSettings.timeToAnswer || 30,
+          points: question.points || roomSettings.points || 100,
+          status: 'approved',
+          agent: question.agent || agentInfo?.agentId || null,
+          efficiencyLevel: question.efficiencyLevel || agentInfo?.efficiencyLevel || null,
+          launchStatus: 'launched'
+        })
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setGeneratedQuestions(prev => [data.question, ...prev])
+
+        // Emit to students via socket (same as existing launch flow)
+        if (socket && isConnected) {
+          socket.emit('new_question', {
+            roomCode: room.code,
+            question: data.question
+          })
+        }
+      }
+    } catch (error) {
+      console.error('Failed to save multi-agent question:', error)
+    }
+  }
+
   const handleManualGenerateQuestions = async () => {
     const textToUse = segmentTranscript.trim() || transcript
     if (!textToUse) {
@@ -1027,18 +1142,28 @@ function RoomDetailPage() {
     setIsGeneratingQuestions(true)
     setGenerateQEnabled(false)
 
+    // --- Multi-Agent branch ---
+    if (roomSettings.multiAgentEnabled) {
+      try {
+        await handleMultiAgentGenerate(textToUse, 'manual')
+        saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
+          .catch((err) => console.error('[MANUAL] Failed to save transcript:', err))
+      } catch (error) {
+        console.error('Manual multi-agent generation failed:', error)
+        alert('Multi-agent generation failed: ' + error.message)
+        setGenerateQEnabled(true)
+      }
+      setIsGeneratingQuestions(false)
+      return
+    }
+
+    // --- Single-agent branch (existing) ---
     try {
-      // Manual "Generate Q" is the fail-safe RETRY of the CURRENT segment's automatic generation, so
-      // it targets `currentSegment` (matching handleSegmentComplete) and does NOT advance the counter
-      // — it re-does segment N, it does not move to N+1 (the next segment is bumped later by
-      // startRecording when the teacher resumes).
       const questions = await generateQuestionsFromText(textToUse, currentSegment)
       if (questions && questions.length > 0) {
         setPendingQuestions(questions)
         setShowQuestionPopup(true)
         setIsPopupOpen(true)
-        // Persist the transcript only once questions exist — fire-and-forget so it never blocks.
-        // Live transcript → source 'audio'; segmentIndex matches the questions (currentSegment).
         saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
           .catch((err) => console.error('[MANUAL] Failed to save transcript (questions already generated):', err))
       }
@@ -2138,6 +2263,33 @@ function RoomDetailPage() {
           onClose={handleTextQuestionClose}
           onNext={handleTextQuestionClose}
           isLast={true}
+        />
+      )}
+
+      {/* Multi-Agent Question Comparison Popup */}
+      {showMultiAgentPopup && multiAgentResults && (
+        <MultiAgentQuestionPopup
+          agentResults={multiAgentResults}
+          onApprove={handleMultiAgentApprove}
+          onClose={() => {
+            setShowMultiAgentPopup(false)
+            setMultiAgentResults(null)
+            setIsPopupOpen(false)
+            setIsPendingReview(false)
+            setGenerateQEnabled(true)
+          }}
+          onRegenerate={async () => {
+            const textToUse = segmentTranscript.trim() || transcript.trim()
+            if (!textToUse || textToUse.length < 50) return
+            setMultiAgentResults(null)
+            try {
+              await handleMultiAgentGenerate(textToUse, 'regenerate')
+            } catch (error) {
+              alert('Regeneration failed: ' + error.message)
+            }
+          }}
+          isRegenerating={isMultiAgentGenerating}
+          roomSettings={roomSettings}
         />
       )}
 

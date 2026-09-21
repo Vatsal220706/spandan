@@ -266,6 +266,115 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
               ))
             )}
           </select>
+          {localSettings.multiAgentEnabled && (
+            <div style={{ marginTop: '4px', fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+              ℹ️ Multi-Agent mode uses Gemini for all agents — provider above is ignored
+            </div>
+          )}
+        </div>
+
+        {/* Multi-Agent Question Generation */}
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: '10px',
+            fontSize: '14px',
+            fontWeight: '500',
+            color: 'var(--text-primary)'
+          }}>
+            <span>🤖 Multi-Agent Generation</span>
+            <button
+              onClick={() => setLocalSettings(prev => ({ ...prev, multiAgentEnabled: !prev.multiAgentEnabled }))}
+              style={{
+                padding: '4px 12px',
+                borderRadius: '20px',
+                border: 'none',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                background: localSettings.multiAgentEnabled ? '#10b981' : 'var(--bg-secondary)',
+                color: localSettings.multiAgentEnabled ? 'white' : 'var(--text-secondary)',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              {localSettings.multiAgentEnabled ? 'ON' : 'OFF'}
+            </button>
+          </label>
+
+          {localSettings.multiAgentEnabled && (
+            <div style={{
+              background: 'var(--bg-secondary)',
+              borderRadius: '10px',
+              padding: '12px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                Select which agents to run (each generates a question for you to compare):
+              </div>
+              {[
+                { id: 'agent_1', label: '⚡ Agent 1 — Basic (60%)', color: '#f59e0b' },
+                { id: 'agent_2', label: '🎯 Agent 2 — Intermediate (75%)', color: '#3b82f6' },
+                { id: 'agent_3', label: '🧠 Agent 3 — Advanced (90%)', color: '#10b981' }
+              ].map(agent => {
+                const isActive = (localSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']).includes(agent.id)
+                const activeAgents = localSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
+                const canDeselect = activeAgents.filter(a => a !== agent.id).length >= 1
+
+                return (
+                  <button
+                    key={agent.id}
+                    onClick={() => {
+                      if (isActive && !canDeselect) return // must have at least 1
+                      const current = localSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
+                      const next = isActive
+                        ? current.filter(a => a !== agent.id)
+                        : [...current, agent.id]
+                      setLocalSettings(prev => ({ ...prev, activeAgents: next }))
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      border: isActive ? `2px solid ${agent.color}` : '2px solid transparent',
+                      background: isActive ? `${agent.color}15` : 'var(--bg-primary)',
+                      color: 'var(--text-primary)',
+                      fontSize: '13px',
+                      fontWeight: isActive ? '600' : '400',
+                      cursor: (isActive && !canDeselect) ? 'not-allowed' : 'pointer',
+                      opacity: (isActive && !canDeselect) ? 0.7 : 1,
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    <span style={{
+                      width: '18px',
+                      height: '18px',
+                      borderRadius: '4px',
+                      border: isActive ? `2px solid ${agent.color}` : '2px solid var(--border-color)',
+                      background: isActive ? agent.color : 'transparent',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '11px',
+                      color: 'white',
+                      flexShrink: 0
+                    }}>
+                      {isActive && '✓'}
+                    </span>
+                    {agent.label}
+                  </button>
+                )
+              })}
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                All agents use Gemini API • Runs sequentially • At least 1 required
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Question Type Distribution */}

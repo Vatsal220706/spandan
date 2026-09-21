@@ -1,6 +1,7 @@
 import express from 'express'
 import { authenticate, authorize, requireApprovedTeacher } from '../middleware/auth.js'
 import { generateQuestions, AI_PROVIDERS } from '../services/questionService.js'
+import { generateMultiAgentQuestions, getAllAgents } from '../services/multiAgentService.js'
 import { getGenerationQueue } from '../services/generationQueue.js'
 import { stripObject } from '../utils/sanitize.js'
 import { checkRoomOwnership } from '../utils/roomOwnership.js'
@@ -25,7 +26,15 @@ router.get('/providers', (req, res) => {
   })
 })
 
-// POST /api/questions/generate - Generate questions from transcript
+// GET /api/questions/agents - Get available multi-agent configs for the settings UI
+router.get('/agents', (req, res) => {
+  res.json({
+    success: true,
+    agents: getAllAgents()
+  })
+})
+
+// POST /api/questions/generate - Generate questions from transcript (single-agent, existing)
 // Authorization: teacher only
 router.post('/generate', authorize('teacher'), requireApprovedTeacher, async (req, res) => {
   try {
@@ -73,6 +82,54 @@ router.post('/generate', authorize('teacher'), requireApprovedTeacher, async (re
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to generate questions'
+    })
+  }
+})
+
+// POST /api/questions/generate-multi - Multi-agent question generation
+// Runs 1–3 agents sequentially, each with a different efficiency profile, all using Gemini.
+// Returns grouped results so the teacher can compare and select.
+// Authorization: teacher only
+router.post('/generate-multi', authorize('teacher'), requireApprovedTeacher, async (req, res) => {
+  try {
+    const { transcript, config } = req.body
+    const {
+      numQuestions = 1,          // questions per agent (default 1 for comparison)
+      difficulty = 'medium',
+      questionTypeMix = null,
+      agents = ['agent_1', 'agent_2', 'agent_3']  // which agents to run
+    } = config || {}
+
+    if (!transcript || transcript.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Transcript is required'
+      })
+    }
+
+    if (!Array.isArray(agents) || agents.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'At least one agent must be specified'
+      })
+    }
+
+    console.log(`[generate-multi] Starting multi-agent generation: ${agents.length} agent(s), ${numQuestions} Q/agent`)
+
+    const result = await generateMultiAgentQuestions(transcript, {
+      numQuestions,
+      difficulty,
+      questionTypeMix,
+      agents
+    })
+
+    console.log(`[generate-multi] Complete in ${result.totalElapsed}s`)
+    res.json(result)
+  } catch (error) {
+    console.error('Multi-agent generation error:', error)
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate multi-agent questions'
     })
   }
 })

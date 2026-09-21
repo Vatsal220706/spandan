@@ -55,6 +55,36 @@ const questionSchema = new mongoose.Schema({
   closeAt: {
     type: Date,
     default: null
+  },
+
+  // --- Multi-Agent Question Generation fields (all optional, backward compatible) ---
+  // Which agent generated this question (null = single-agent / manual)
+  agent: {
+    type: String,
+    enum: ['agent_1', 'agent_2', 'agent_3', null],
+    default: null
+  },
+  // Target efficiency level of the generating agent (60, 75, 90, or null)
+  efficiencyLevel: {
+    type: Number,
+    default: null
+  },
+  // Relevant transcript snippet that the question was generated from
+  sourceContext: {
+    type: String,
+    default: ''
+  },
+  // Batch ID linking all questions generated in the same multi-agent run
+  generationBatchId: {
+    type: String,
+    default: null
+  },
+  // Lifecycle status for multi-agent questions: generated → reviewed → selected → launched
+  // Null for questions created outside the multi-agent flow (manual, single-agent).
+  launchStatus: {
+    type: String,
+    enum: ['generated', 'reviewed', 'selected', 'launched', null],
+    default: null
   }
 })
 

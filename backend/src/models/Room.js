@@ -56,7 +56,13 @@ const roomSchema = new mongoose.Schema({
     // Only meaningful while anonymousLeaderboard is ON. When the teacher turns this ON, students ALSO
     // see the real names of the bottom anonymityPercent% (the same lowest-scorer slice the teacher
     // sees) appended to their masked top-N board. OFF (default) = students see only the masked top-N.
-    revealBottomToStudents: { type: Boolean, default: false }
+    revealBottomToStudents: { type: Boolean, default: false },
+    // --- Multi-Agent Question Generation settings ---
+    // When ON, question generation runs 3 AI agents (60%, 75%, 90%) instead of a single provider.
+    // The teacher sees all results and picks which question to launch.
+    multiAgentEnabled: { type: Boolean, default: false },
+    // Which agents to run when multi-agent is enabled. Subset of ['agent_1','agent_2','agent_3'].
+    activeAgents: { type: [String], default: ['agent_1', 'agent_2', 'agent_3'] }
   }
 }, {
   timestamps: true
