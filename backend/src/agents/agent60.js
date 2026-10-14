@@ -1,5 +1,5 @@
 /**
- * Agent 1 — 60% Efficiency Profile
+ * Agent 1 — Basic Profile
  *
  * Generates questions quickly with basic comprehension focus.
  * Direct conceptual questions, important facts, simple reasoning.
@@ -9,8 +9,8 @@
 const agent60 = {
   agentId: 'agent_1',
   efficiencyLevel: 60,
-  label: 'Basic (60%)',
-  shortLabel: '60%',
+  label: 'Basic',
+  shortLabel: 'Basic',
   color: '#f59e0b',  // Amber — warm, approachable
   icon: '⚡',
 
@@ -35,11 +35,15 @@ BLOOM'S TAXONOMY FOCUS:
 - Occasionally: Apply (simple, direct application)
 - Never: Analyze, Evaluate, Create
 
+RELATIVE DIFFICULTY CONSTRAINT:
+- CRITICAL: You are Level 1 (Basic). Your question MUST be the simplest, most direct, and most straightforward of all three agents.
+
 QUALITY STANDARDS:
 - Every question must be answerable from the provided content
-- Do not invent information or go beyond what the content supports
+- Use the words, terminology, and key concepts directly from the transcript only
+- Do not invent information or go beyond what the transcript explicitly mentions
 - Questions should stand on their own without referencing "the text" or "the speaker"
-- Even at 60% efficiency, questions must be RELEVANT and WELL-FORMED — not trivial or obvious`
+- Even at basic efficiency, questions must be RELEVANT and WELL-FORMED — not trivial or obvious`
 }
 
 export default agent60

@@ -243,7 +243,7 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
             Question Generator
           </label>
           <select
-            value={localSettings.questionProvider || 'minimax'}
+            value={localSettings.questionProvider || 'auto'}
             onChange={(e) => setLocalSettings(prev => ({ ...prev, questionProvider: e.target.value }))}
             style={{
               width: '100%',
@@ -316,9 +316,9 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
                 Select which agents to run (each generates a question for you to compare):
               </div>
               {[
-                { id: 'agent_1', label: '⚡ Agent 1 — Basic (60%)', color: '#f59e0b' },
-                { id: 'agent_2', label: '🎯 Agent 2 — Intermediate (75%)', color: '#3b82f6' },
-                { id: 'agent_3', label: '🧠 Agent 3 — Advanced (90%)', color: '#10b981' }
+                { id: 'agent_1', label: '⚡ Agent 1 — Basic', color: '#f59e0b' },
+                { id: 'agent_2', label: '🎯 Agent 2 — Intermediate', color: '#3b82f6' },
+                { id: 'agent_3', label: '🧠 Agent 3 — Advanced', color: '#10b981' }
               ].map(agent => {
                 const isActive = (localSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']).includes(agent.id)
                 const activeAgents = localSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
@@ -399,11 +399,11 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
                   min="0"
                   max="100"
                   value={localSettings.questionTypeMix?.[type] ??
-                    (type === 'MCQ' ? 0 : type === 'TF' ? 100 : 0)}
+                    (type === 'MCQ' ? 50 : type === 'TF' ? 30 : 20)}
                   onChange={(e) => setLocalSettings(prev => ({
                     ...prev,
                     questionTypeMix: {
-                      ...(prev.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 }),
+                      ...(prev.questionTypeMix || { MCQ: 50, TF: 30, MSQ: 20 }),
                       [type]: parseInt(e.target.value) || 0
                     }
                   }))}

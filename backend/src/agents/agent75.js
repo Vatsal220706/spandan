@@ -1,5 +1,5 @@
 /**
- * Agent 2 — 75% Efficiency Profile
+ * Agent 2 — Intermediate Profile
  *
  * Generates questions with moderate reasoning and contextual understanding.
  * Application-based questions, connecting multiple concepts, moderate difficulty.
@@ -9,8 +9,8 @@
 const agent75 = {
   agentId: 'agent_2',
   efficiencyLevel: 75,
-  label: 'Intermediate (75%)',
-  shortLabel: '75%',
+  label: 'Intermediate',
+  shortLabel: 'Intermediate',
   color: '#3b82f6',  // Blue — balanced, professional
   icon: '🎯',
 
@@ -33,12 +33,16 @@ QUESTION CHARACTERISTICS:
 BLOOM'S TAXONOMY FOCUS:
 - Primarily: Understand (deep), Apply
 - Occasionally: Analyze (basic analysis)
-- Avoid: Pure recall, highly complex multi-step evaluation
+- Avoid: Pure recall, highly complex multi-step evaluation, or tricky edge cases
+
+RELATIVE DIFFICULTY CONSTRAINT:
+- CRITICAL: You are Level 2 (Intermediate). Your question MUST NOT look or feel harder than Agent 3 (Advanced).
+- Keep questions clear, accessible, and balanced. Test genuine understanding without deceptive traps.
 
 QUALITY STANDARDS:
 - Every question must be answerable using information from the provided content
-- Inference is encouraged when clearly supported by the content's own logic
-- Do not invent information or introduce concepts not present in the content
+- Stay strictly within the context and vocabulary of the transcript
+- Do not invent information, introduce external scenarios, or use concepts not present in the transcript
 - Questions should stand on their own without referencing "the text", "the speaker", or "the source"
 - Aim for questions where a student needs to THINK for 10-15 seconds, not just remember`
 }

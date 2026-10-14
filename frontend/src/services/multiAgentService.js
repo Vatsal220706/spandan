@@ -14,21 +14,37 @@ import useAuthStore from '../stores/authStore.js'
  */
 export const requestMultiAgentGeneration = async (transcript, config) => {
   const token = useAuthStore.getState().token
-  const response = await fetch(`${API_URL}/questions/generate-multi`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
-    },
-    body: JSON.stringify({ transcript, config })
-  })
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}))
-    throw new Error(errData.error || `HTTP ${response.status}`)
+  // 300s timeout — 3 agents run sequentially on the backend (~60s each max)
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 300_000)
+
+  try {
+    const response = await fetch(`${API_URL}/questions/generate-multi`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ transcript, config }),
+      signal: controller.signal
+    })
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}))
+      throw new Error(errData.error || `HTTP ${response.status}`)
+    }
+
+    return response.json()
+  } catch (err) {
+    clearTimeout(timeoutId)
+    if (err.name === 'AbortError') {
+      throw new Error('Multi-agent generation timed out. The AI agents took too long — try with a shorter transcript.')
+    }
+    throw err
   }
-
-  return response.json()
 }
 
 /**

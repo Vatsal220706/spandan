@@ -109,11 +109,11 @@ function RoomDetailPage() {
     segmentTime: 2,
     questionsPerSegment: 2,
     difficulty: 'medium',
-    questionProvider: 'minimax',
-    questionTypeMix: { MCQ: 0, TF: 100, MSQ: 0 },
+    questionProvider: 'auto',
+    questionTypeMix: { MCQ: 50, TF: 30, MSQ: 20 },
     timeToAnswer: 30,
     points: 100,
-    multiAgentEnabled: false,
+    multiAgentEnabled: true,
     activeAgents: ['agent_1', 'agent_2', 'agent_3']
   })
   const [totalParticipants, setTotalParticipants] = useState(0)
@@ -434,7 +434,7 @@ function RoomDetailPage() {
       const data = await requestQuestionGeneration(text, {
         numQuestions: roomSettings.questionsPerSegment,
         difficulty: roomSettings.difficulty,
-        provider: roomSettings.questionProvider || 'minimax',
+        provider: roomSettings.questionProvider || 'auto',
         questionTypeMix: roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 }
       }, { signal: genAbortRef.current.signal })
 
@@ -461,11 +461,18 @@ function RoomDetailPage() {
     setIsGeneratingFromText(true)
 
     try {
+      // Resolve the type mix from the mode selected in the paste popup
+      const resolvedTypeMix = mode === 'TF'
+        ? { MCQ: 0, TF: 100, MSQ: 0 }
+        : mode === 'MCQ'
+          ? { MCQ: 100, TF: 0, MSQ: 0 }
+          : null // null = use room default mix
+
       // --- Multi-Agent branch for paste flow ---
       if (roomSettings.multiAgentEnabled) {
         setShowGeneratingPopup(false)
         try {
-          await handleMultiAgentGenerate(text, 'paste')
+          await handleMultiAgentGenerate(text, 'paste', resolvedTypeMix)
           saveTranscript(room._id, -1, text, 0, 'paste')
             .catch((err) => console.error('[PASTE] Failed to save transcript:', err))
         } catch (error) {
@@ -479,16 +486,14 @@ function RoomDetailPage() {
       }
 
       // --- Single-agent branch (existing) ---
-      const typeMix = mode === 'TF'
-        ? { MCQ: 0, TF: 100, MSQ: 0 }
-        : (roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 })
+      const typeMix = resolvedTypeMix || (roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 })
 
       genAbortRef.current = new AbortController()
       // Helper handles both the sync response and the async (jobId → poll) path.
       const data = await requestQuestionGeneration(text, {
         numQuestions: roomSettings.questionsPerSegment,
         difficulty: roomSettings.difficulty,
-        provider: roomSettings.questionProvider || 'minimax',
+        provider: roomSettings.questionProvider || 'auto',
         questionTypeMix: typeMix
       }, { signal: genAbortRef.current.signal })
 
@@ -1061,15 +1066,16 @@ function RoomDetailPage() {
   }
 
   // --- Multi-Agent generation handler (shared by segment, paste, and manual flows) ---
-  const handleMultiAgentGenerate = async (text, source = 'segment') => {
+  // questionTypeMixOverride: when the paste popup forces TF mode, pass { MCQ:0, TF:100, MSQ:0 }
+  const handleMultiAgentGenerate = async (text, source = 'segment', questionTypeMixOverride = null) => {
     setIsMultiAgentGenerating(true)
     setShowGeneratingPopup(true)
 
     try {
       const result = await requestMultiAgentGeneration(text, {
-        numQuestions: 1, // 1 question per agent for comparison
+        numQuestions: 1, // each agent generates 1 question to compare for this segment
         difficulty: roomSettings.difficulty,
-        questionTypeMix: roomSettings.questionTypeMix || { MCQ: 0, TF: 100, MSQ: 0 },
+        questionTypeMix: questionTypeMixOverride || roomSettings.questionTypeMix || { MCQ: 50, TF: 30, MSQ: 20 },
         agents: roomSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
       })
 
@@ -1133,46 +1139,27 @@ function RoomDetailPage() {
   }
 
   const handleManualGenerateQuestions = async () => {
-    const textToUse = segmentTranscript.trim() || transcript
+    const textToUse = segmentTranscript.trim() || transcript.trim() || finalTranscriptRef.current?.trim()
     if (!textToUse) {
-      alert('No transcript available to generate questions from.')
+      alert('No audio transcript available yet. Please start recording or speak to capture audio first.')
       return
     }
 
     setIsGeneratingQuestions(true)
     setGenerateQEnabled(false)
 
-    // --- Multi-Agent branch ---
-    if (roomSettings.multiAgentEnabled) {
-      try {
-        await handleMultiAgentGenerate(textToUse, 'manual')
-        saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
-          .catch((err) => console.error('[MANUAL] Failed to save transcript:', err))
-      } catch (error) {
-        console.error('Manual multi-agent generation failed:', error)
-        alert('Multi-agent generation failed: ' + error.message)
-        setGenerateQEnabled(true)
-      }
-      setIsGeneratingQuestions(false)
-      return
-    }
-
-    // --- Single-agent branch (existing) ---
     try {
-      const questions = await generateQuestionsFromText(textToUse, currentSegment)
-      if (questions && questions.length > 0) {
-        setPendingQuestions(questions)
-        setShowQuestionPopup(true)
-        setIsPopupOpen(true)
-        saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
-          .catch((err) => console.error('[MANUAL] Failed to save transcript (questions already generated):', err))
-      }
+      // Always run multi-agent question comparison with the settings question type distribution
+      await handleMultiAgentGenerate(textToUse, 'manual')
+      saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
+        .catch((err) => console.error('[MANUAL] Failed to save transcript:', err))
     } catch (error) {
-      console.error('Manual question generation failed:', error)
+      console.error('Manual multi-agent generation failed:', error)
       alert('Failed to generate questions: ' + error.message)
       setGenerateQEnabled(true)
+    } finally {
+      setIsGeneratingQuestions(false)
     }
-    setIsGeneratingQuestions(false)
   }
 
   const handleApproveQuestion = async (question) => {
@@ -1856,7 +1843,7 @@ function RoomDetailPage() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ color: 'var(--text-secondary)' }}>Provider:</span>
-                    <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{roomSettings.questionProvider || 'minimax'}</span>
+                    <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{roomSettings.questionProvider || 'auto'}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ color: 'var(--text-secondary)' }}>Time/Answer:</span>
@@ -1934,7 +1921,7 @@ function RoomDetailPage() {
                   )}
                   <button
                     onClick={handleManualGenerateQuestions}
-                    disabled={isGeneratingQuestions || !transcript || !generateQEnabled}
+                    disabled={isGeneratingQuestions || isMultiAgentGenerating || (!transcript && !segmentTranscript) || !generateQEnabled}
                     style={{
                       padding: '4px 12px',
                       background: '#3b82f6',
@@ -1943,14 +1930,14 @@ function RoomDetailPage() {
                       borderRadius: '6px',
                       fontSize: '12px',
                       fontWeight: '500',
-                      cursor: isGeneratingQuestions || !transcript || !generateQEnabled ? 'not-allowed' : 'pointer',
-                      opacity: isGeneratingQuestions || !transcript || !generateQEnabled ? 0.6 : 1,
+                      cursor: isGeneratingQuestions || isMultiAgentGenerating || (!transcript && !segmentTranscript) || !generateQEnabled ? 'not-allowed' : 'pointer',
+                      opacity: isGeneratingQuestions || isMultiAgentGenerating || (!transcript && !segmentTranscript) || !generateQEnabled ? 0.6 : 1,
                       display: 'flex',
                       alignItems: 'center',
                       gap: '4px'
                     }}
                   >
-                    {isGeneratingQuestions ? '⏳ Generating...' : '🔄 Generate Q'}
+                    {isGeneratingQuestions || isMultiAgentGenerating ? '⏳ Generating...' : '⚡ Generate Q'}
                   </button>
                 </div>
               </div>
@@ -2279,10 +2266,14 @@ function RoomDetailPage() {
             setGenerateQEnabled(true)
           }}
           onRegenerate={async () => {
-            const textToUse = segmentTranscript.trim() || transcript.trim()
-            if (!textToUse || textToUse.length < 50) return
-            setMultiAgentResults(null)
+            const textToUse = pastedText || segmentTranscript.trim() || transcript.trim()
+            if (!textToUse || textToUse.length < 20) {
+              alert('Transcript is too short to regenerate questions.')
+              return
+            }
             try {
+              // Don't null out results — the popup stays visible with isRegenerating=true
+              // handleMultiAgentGenerate will replace results atomically when done
               await handleMultiAgentGenerate(textToUse, 'regenerate')
             } catch (error) {
               alert('Regeneration failed: ' + error.message)

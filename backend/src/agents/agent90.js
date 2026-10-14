@@ -1,5 +1,5 @@
 /**
- * Agent 3 — 90% Efficiency and Accuracy Profile
+ * Agent 3 — Advanced Profile
  *
  * Generates the highest-quality questions among the three agents.
  * Deeper reasoning, multi-concept relationships, careful verification.
@@ -9,8 +9,8 @@
 const agent90 = {
   agentId: 'agent_3',
   efficiencyLevel: 90,
-  label: 'Advanced (90%)',
-  shortLabel: '90%',
+  label: 'Advanced',
+  shortLabel: 'Advanced',
   color: '#10b981',  // Emerald — premium, high-quality
   icon: '🧠',
 
@@ -37,6 +37,10 @@ BLOOM'S TAXONOMY FOCUS:
 - Rarely: Understand (only when testing nuanced understanding)
 - Never: Pure recall or simple fact-checking
 
+RELATIVE DIFFICULTY CONSTRAINT:
+- CRITICAL: You are Level 3 (Advanced). Your question MUST unambiguously be the most challenging and analytically rigorous question among the three agents.
+- It must clearly feel more advanced and demanding than Agent 2 (Intermediate) and Agent 1 (Basic).
+
 VERIFICATION REQUIREMENTS (critical — this is what makes you the 90% agent):
 - Before finalizing each question, VERIFY that:
   1. The question is FULLY SUPPORTED by the provided content — no invented facts
@@ -48,11 +52,11 @@ VERIFICATION REQUIREMENTS (critical — this is what makes you the 90% agent):
 
 QUALITY STANDARDS:
 - Every question must be answerable using information from the provided content
-- Inference is STRONGLY encouraged when clearly supported by the content's logic
-- Do not invent information or introduce concepts not present in the content
+- Ground all questions and options strictly in the vocabulary, terminology, and context of the transcript
+- Do not introduce outside concepts, external scenarios, or unmentioned domains
 - Questions should stand on their own without referencing "the text", "the speaker", "the source material"
-- Prefer questions that reveal the DEPTH of a student's understanding
-- If the content does not support a high-quality analytical question, produce the best possible question at a lower Bloom level rather than forcing a bad analytical question`
+- Prefer questions that reveal the DEPTH of a student's understanding within the provided material
+- If the content does not support a high-quality analytical question, produce the best possible question at a lower Bloom level rather than forcing outside concepts`
 }
 
 export default agent90

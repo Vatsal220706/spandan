@@ -1,11 +1,13 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import QuestionEditor from './QuestionEditor'
 
 /**
  * MultiAgentQuestionPopup
  *
  * Full-screen overlay showing questions from all agents side-by-side.
- * The teacher can compare, edit, select one, and launch it to students.
+ * Supports multi-question navigation: if each agent generates N questions,
+ * the teacher sees question[0] from all agents first, selects & launches one,
+ * then clicks "Next" to see question[1], etc.
  *
  * Props:
  *   agentResults   — { agent_1: { questions, label, color, icon, error, elapsed }, ... }
@@ -23,36 +25,70 @@ function MultiAgentQuestionPopup({
   isRegenerating = false,
   roomSettings = {}
 }) {
+  // Current question index (for multi-question navigation)
+  const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedAgent, setSelectedAgent] = useState(null)
   const [editingAgent, setEditingAgent] = useState(null)
-  const [editedQuestions, setEditedQuestions] = useState({}) // agentId -> edited question
-  const [launched, setLaunched] = useState(false)
+  const [editedQuestions, setEditedQuestions] = useState({}) // `${agentId}_${index}` -> edited question
+  const [launchedIndices, setLaunchedIndices] = useState(new Set()) // which question indices have been launched
   const [launchCountdown, setLaunchCountdown] = useState(null)
+  const intervalRef = useRef(null)
+
+  // Clean up countdown interval on unmount
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
+  }, [])
+
+  // Reset selection when navigating to a new question
+  useEffect(() => {
+    setSelectedAgent(null)
+    setEditingAgent(null)
+    setLaunchCountdown(null)
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  }, [currentIndex])
 
   // Sort agents by efficiency level
   const sortedAgents = Object.entries(agentResults)
     .sort(([, a], [, b]) => (a.efficiencyLevel || 0) - (b.efficiencyLevel || 0))
 
-  // Get the question for an agent (edited version if available, otherwise original)
+  // Total number of questions (max across agents)
+  const totalQuestions = Math.max(
+    ...Object.values(agentResults).map(r => r.questions?.length || 0),
+    1
+  )
+
+  const isCurrentLaunched = launchedIndices.has(currentIndex)
+  const isLastQuestion = currentIndex >= totalQuestions - 1
+  const allDone = launchedIndices.size >= totalQuestions
+
+  // Get the question for an agent at the current index
   const getQuestion = (agentId) => {
-    if (editedQuestions[agentId]) return editedQuestions[agentId]
+    const editKey = `${agentId}_${currentIndex}`
+    if (editedQuestions[editKey]) return editedQuestions[editKey]
     const result = agentResults[agentId]
-    return result?.questions?.[0] || null
+    return result?.questions?.[currentIndex] || null
   }
 
   // Handle question edit
   const handleQuestionEdit = (agentId, updatedQuestion) => {
-    setEditedQuestions(prev => ({ ...prev, [agentId]: updatedQuestion }))
+    const editKey = `${agentId}_${currentIndex}`
+    setEditedQuestions(prev => ({ ...prev, [editKey]: updatedQuestion }))
   }
 
   // Handle select
   const handleSelect = (agentId) => {
+    if (isCurrentLaunched) return
     setSelectedAgent(agentId === selectedAgent ? null : agentId)
   }
 
   // Handle launch
   const handleLaunch = () => {
-    if (!selectedAgent) return
+    if (!selectedAgent || isCurrentLaunched) return
     const question = getQuestion(selectedAgent)
     if (!question) return
 
@@ -65,15 +101,17 @@ function MultiAgentQuestionPopup({
       efficiencyLevel: agentInfo?.efficiencyLevel
     }
 
-    setLaunched(true)
+    setLaunchedIndices(prev => new Set([...prev, currentIndex]))
 
-    // Start countdown timer
+    // Start countdown timer (with ref for cleanup on unmount)
     const timer = roomSettings.timeToAnswer || 30
     setLaunchCountdown(timer)
-    const interval = setInterval(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    intervalRef.current = setInterval(() => {
       setLaunchCountdown(prev => {
         if (prev <= 1) {
-          clearInterval(interval)
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
           return 0
         }
         return prev - 1
@@ -81,6 +119,20 @@ function MultiAgentQuestionPopup({
     }, 1000)
 
     onApprove(launchQuestion, { agentId: selectedAgent, ...agentInfo })
+  }
+
+  // Navigate to next question
+  const handleNext = () => {
+    if (currentIndex < totalQuestions - 1) {
+      setCurrentIndex(prev => prev + 1)
+    }
+  }
+
+  // Navigate to previous question
+  const handlePrev = () => {
+    if (currentIndex > 0) {
+      setCurrentIndex(prev => prev - 1)
+    }
   }
 
   return (
@@ -116,7 +168,7 @@ function MultiAgentQuestionPopup({
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          marginBottom: '24px'
+          marginBottom: '20px'
         }}>
           <div>
             <h2 style={{
@@ -138,7 +190,7 @@ function MultiAgentQuestionPopup({
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               onClick={onRegenerate}
-              disabled={isRegenerating || launched}
+              disabled={isRegenerating}
               style={{
                 padding: '8px 16px',
                 borderRadius: '8px',
@@ -146,8 +198,8 @@ function MultiAgentQuestionPopup({
                 background: 'var(--bg-secondary, #2a2a3e)',
                 color: 'var(--text-primary, #fff)',
                 fontSize: '13px',
-                cursor: (isRegenerating || launched) ? 'not-allowed' : 'pointer',
-                opacity: (isRegenerating || launched) ? 0.5 : 1
+                cursor: isRegenerating ? 'not-allowed' : 'pointer',
+                opacity: isRegenerating ? 0.5 : 1
               }}
             >
               {isRegenerating ? '⏳ Regenerating...' : '🔄 Regenerate'}
@@ -169,6 +221,89 @@ function MultiAgentQuestionPopup({
           </div>
         </div>
 
+        {/* Question Navigation Bar (only when multiple questions) */}
+        {totalQuestions > 1 && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '12px',
+            marginBottom: '18px',
+            padding: '10px 16px',
+            borderRadius: '10px',
+            background: 'var(--bg-secondary, #2a2a3e)'
+          }}>
+            <button
+              onClick={handlePrev}
+              disabled={currentIndex === 0}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '6px',
+                border: 'none',
+                background: currentIndex === 0 ? 'transparent' : 'var(--bg-primary, #1a1a2e)',
+                color: currentIndex === 0 ? 'var(--text-secondary, #666)' : 'var(--text-primary, #fff)',
+                fontSize: '13px',
+                fontWeight: '600',
+                cursor: currentIndex === 0 ? 'not-allowed' : 'pointer'
+              }}
+            >
+              ← Prev
+            </button>
+
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              {Array.from({ length: totalQuestions }, (_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setCurrentIndex(i)}
+                  style={{
+                    width: '32px',
+                    height: '32px',
+                    borderRadius: '50%',
+                    border: i === currentIndex ? '2px solid #3b82f6' : '2px solid transparent',
+                    background: launchedIndices.has(i)
+                      ? '#10b981'
+                      : i === currentIndex
+                        ? '#3b82f620'
+                        : 'var(--bg-primary, #1a1a2e)',
+                    color: launchedIndices.has(i) ? 'white' : 'var(--text-primary, #fff)',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  {launchedIndices.has(i) ? '✓' : i + 1}
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={handleNext}
+              disabled={isLastQuestion}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '6px',
+                border: 'none',
+                background: isLastQuestion ? 'transparent' : 'var(--bg-primary, #1a1a2e)',
+                color: isLastQuestion ? 'var(--text-secondary, #666)' : 'var(--text-primary, #fff)',
+                fontSize: '13px',
+                fontWeight: '600',
+                cursor: isLastQuestion ? 'not-allowed' : 'pointer'
+              }}
+            >
+              Next →
+            </button>
+
+            <span style={{ fontSize: '12px', color: 'var(--text-secondary, #999)', marginLeft: '8px' }}>
+              Question {currentIndex + 1} of {totalQuestions}
+              {launchedIndices.size > 0 && ` • ${launchedIndices.size} launched`}
+            </span>
+          </div>
+        )}
+
         {/* Agent Cards */}
         <div style={{
           display: 'grid',
@@ -181,6 +316,7 @@ function MultiAgentQuestionPopup({
             const isSelected = selectedAgent === agentId
             const isEditing = editingAgent === agentId
             const hasError = !!result.error && result.questions.length === 0
+            const hasNoQuestionAtIndex = !question && !hasError
 
             return (
               <div
@@ -196,7 +332,7 @@ function MultiAgentQuestionPopup({
                   padding: '18px',
                   transition: 'all 0.2s ease',
                   position: 'relative',
-                  opacity: (launched && !isSelected) ? 0.4 : 1
+                  opacity: (isCurrentLaunched && !isSelected) ? 0.4 : 1
                 }}
               >
                 {/* Agent Header */}
@@ -220,22 +356,10 @@ function MultiAgentQuestionPopup({
                         fontSize: '11px',
                         color: 'var(--text-secondary, #999)'
                       }}>
-                        {result.elapsed ? `${result.elapsed}s` : ''} {result.questions.length > 0 ? '• Generated' : ''}
+                        {result.elapsed ? `${result.elapsed}s` : ''} {result.questions.length > 0 ? `• ${result.questions.length} Q` : ''}
                       </div>
                     </div>
                   </div>
-                  {/* Efficiency Badge */}
-                  <span style={{
-                    padding: '3px 10px',
-                    borderRadius: '20px',
-                    fontSize: '12px',
-                    fontWeight: '700',
-                    background: `${result.color || '#3b82f6'}20`,
-                    color: result.color || '#3b82f6',
-                    border: `1px solid ${result.color || '#3b82f6'}40`
-                  }}>
-                    {result.efficiencyLevel || '?'}%
-                  </span>
                 </div>
 
                 {/* Error State */}
@@ -250,6 +374,21 @@ function MultiAgentQuestionPopup({
                     textAlign: 'center'
                   }}>
                     ❌ {result.error}
+                  </div>
+                )}
+
+                {/* No question at this index (agent generated fewer questions) */}
+                {hasNoQuestionAtIndex && !hasError && (
+                  <div style={{
+                    padding: '16px',
+                    borderRadius: '10px',
+                    background: 'var(--bg-primary, #1a1a2e)',
+                    color: 'var(--text-secondary, #999)',
+                    fontSize: '13px',
+                    textAlign: 'center',
+                    fontStyle: 'italic'
+                  }}>
+                    No question generated at this index
                   </div>
                 )}
 
@@ -348,7 +487,7 @@ function MultiAgentQuestionPopup({
                       gap: '8px',
                       marginTop: '14px'
                     }}>
-                      {!launched && (
+                      {!isCurrentLaunched && (
                         <>
                           <button
                             onClick={() => setEditingAgent(isEditing ? null : agentId)}
@@ -384,7 +523,7 @@ function MultiAgentQuestionPopup({
                           </button>
                         </>
                       )}
-                      {launched && isSelected && (
+                      {isCurrentLaunched && isSelected && (
                         <div style={{
                           width: '100%',
                           padding: '8px',
@@ -406,8 +545,8 @@ function MultiAgentQuestionPopup({
           })}
         </div>
 
-        {/* Launch Bar */}
-        {selectedAgent && !launched && (
+        {/* Launch Bar — visible when a question is selected but not yet launched */}
+        {selectedAgent && !isCurrentLaunched && (
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -443,28 +582,83 @@ function MultiAgentQuestionPopup({
           </div>
         )}
 
-        {/* Post-launch: Next Question / Finish */}
-        {launched && launchCountdown === 0 && (
+        {/* Post-launch: Next Question button or Finish */}
+        {isCurrentLaunched && (
           <div style={{
             display: 'flex',
             justifyContent: 'center',
             gap: '12px',
             marginTop: '8px'
           }}>
+            {!isLastQuestion ? (
+              <button
+                onClick={handleNext}
+                style={{
+                  padding: '10px 24px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  background: '#3b82f6',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                Next Question →
+              </button>
+            ) : (
+              <button
+                onClick={onClose}
+                style={{
+                  padding: '10px 24px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  background: '#10b981',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                ✅ All Done ({launchedIndices.size}/{totalQuestions} launched)
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* All agents failed — show clear error state */}
+        {sortedAgents.length > 0 && sortedAgents.every(([, r]) => r.error && r.questions.length === 0) && (
+          <div style={{
+            textAlign: 'center',
+            padding: '20px',
+            borderRadius: '12px',
+            background: '#ef444410',
+            border: '1px solid #ef444430',
+            marginBottom: '12px'
+          }}>
+            <div style={{ fontSize: '16px', marginBottom: '8px' }}>❌ All agents failed to generate questions</div>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary, #999)', marginBottom: '12px' }}>
+              This can happen due to API rate limits, network issues, or very short transcripts.
+            </div>
             <button
-              onClick={onClose}
+              onClick={onRegenerate}
+              disabled={isRegenerating}
               style={{
-                padding: '10px 24px',
-                borderRadius: '10px',
+                padding: '10px 20px',
+                borderRadius: '8px',
                 border: 'none',
                 background: '#3b82f6',
                 color: 'white',
                 fontSize: '14px',
                 fontWeight: '600',
-                cursor: 'pointer'
+                cursor: isRegenerating ? 'not-allowed' : 'pointer',
+                opacity: isRegenerating ? 0.5 : 1
               }}
             >
-              📋 Finish
+              {isRegenerating ? '⏳ Retrying...' : '🔄 Try Again'}
             </button>
           </div>
         )}

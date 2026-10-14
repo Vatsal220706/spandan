@@ -21,6 +21,11 @@ export const config = {
 }
 
 export const AI_PROVIDERS = {
+  auto: {
+    name: 'Auto (Smart Fallback)',
+    enabled: true,
+    icon: '⚡'
+  },
   minimax: {
     name: 'MiniMax',
     enabled: !!config.minimaxApiKey,

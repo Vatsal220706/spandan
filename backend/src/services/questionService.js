@@ -172,94 +172,150 @@ export const getQuestionResults = async (questionId) => {
 
 // Question Type Mix helper
 function getQuestionTypeMix(numQuestions) {
-  const types = []
-  
-  if (numQuestions === 1) {
-    types.push('MCQ')
-  } else if (numQuestions === 2) {
-    types.push('MCQ', 'TF')
-  } else if (numQuestions === 3) {
-    types.push('MCQ', 'TF', 'MSQ')
-  } else {
-    const mcqCount = Math.round(numQuestions * 0.5)
-    const tfCount = Math.round(numQuestions * 0.3)
-    const msqCount = numQuestions - mcqCount - tfCount
-    
-    for (let i = 0; i < mcqCount; i++) types.push('MCQ')
-    for (let i = 0; i < tfCount; i++) types.push('TF')
-    for (let i = 0; i < msqCount; i++) types.push('MSQ')
-  }
-  
-  return types.slice(0, numQuestions)
+  return Array(numQuestions).fill('MCQ')
 }
 
 // Generate question types from provided mix percentages
 function generateFromMix(questionTypeMix, numQuestions) {
-  const { MCQ = 0, TF = 100, MSQ = 0 } = questionTypeMix
-  const total = MCQ + TF + MSQ
+  if (!questionTypeMix) {
+    return getQuestionTypeMix(numQuestions)
+  }
 
-  // Guard against an all-zero mix (avoids divide-by-zero → NaN counts)
+  const { MCQ = 0, TF = 0, MSQ = 0 } = questionTypeMix
+  const mcqVal = Number(MCQ) || 0
+  const tfVal = Number(TF) || 0
+  const msqVal = Number(MSQ) || 0
+  const total = mcqVal + tfVal + msqVal
+
   if (total <= 0) {
     return getQuestionTypeMix(numQuestions)
   }
 
-  const mcqCount = Math.round((MCQ / total) * numQuestions)
-  const tfCount = Math.round((TF / total) * numQuestions)
-  const msqCount = numQuestions - mcqCount - tfCount
-  
+  if (numQuestions === 1) {
+    const r = Math.random() * total
+    if (r < mcqVal) return ['MCQ']
+    if (r < mcqVal + tfVal) return ['TF']
+    return ['MSQ']
+  }
+
+  let mcqCount = Math.round((mcqVal / total) * numQuestions)
+  let tfCount = Math.round((tfVal / total) * numQuestions)
+  let msqCount = Math.round((msqVal / total) * numQuestions)
+
+  let currentTotal = mcqCount + tfCount + msqCount
+  while (currentTotal < numQuestions) {
+    if (mcqVal >= tfVal && mcqVal >= msqVal) mcqCount++
+    else if (tfVal >= msqVal) tfCount++
+    else msqCount++
+    currentTotal++
+  }
+  while (currentTotal > numQuestions) {
+    if (msqCount > 0) msqCount--
+    else if (tfCount > 0) tfCount--
+    else if (mcqCount > 0) mcqCount--
+    currentTotal--
+  }
+
   const types = []
   for (let i = 0; i < mcqCount; i++) types.push('MCQ')
   for (let i = 0; i < tfCount; i++) types.push('TF')
   for (let i = 0; i < msqCount; i++) types.push('MSQ')
-  
-  // Shuffle to mix them up nicely
+
   for (let i = types.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [types[i], types[j]] = [types[j], types[i]]
   }
-  
+
   return types.slice(0, numQuestions)
 }
 
 // Build prompt for question generation
-export function buildQuestionPrompt(transcript, questionTypes, difficulty) {
+export function buildQuestionPrompt(transcript, questionTypes, difficulty, agentProfile = null) {
+  const diff = String(difficulty || 'medium').toLowerCase()
+  
+  let relativeHierarchy = '';
+  let bloomEmphasis = '';
+  let toughness = '';
+  let comprehension = '';
+  let sentenceLengthRule = '- One sentence each. Answerable in ~15 seconds.';
+
+  if (agentProfile === 'basic') {
+    relativeHierarchy = `DIFFICULTY TIER: LEVEL 1 of 3 (EASIEST).
+- This is the BASIC level: questions must be straightforward, direct, and foundational.
+- Direct definition or explicit fact check directly from the transcript text.
+- Must be the easiest of all three agents. No deceptive wording, no subtle traps.`;
+    bloomEmphasis = 'Focus purely on Remember and direct Understand levels. Straightforward definitions, key concepts, and clearly stated facts.';
+    toughness = 'Easiest tier: direct, clear comprehension. Anyone who paid basic attention should answer with ease.';
+    comprehension = '- Test direct comprehension using definitions, examples, and key points explicitly stated in the transcript.';
+    sentenceLengthRule = '- MUST be very short and concise (under 15 words if possible).';
+  } else if (agentProfile === 'intermediate') {
+    relativeHierarchy = `DIFFICULTY TIER: LEVEL 2 of 3 (MODERATE).
+- CRITICAL RULE: Intermediate MUST NOT be harder than Advanced!
+- It should test standard understanding: why a concept is used, what purpose it serves, or how two mentioned ideas relate.
+- Moderate difficulty: more thoughtful than Basic, but straightforward and fair.
+- DO NOT use tricky wording, deceptive technicalities, or subtle edge-case traps (those belong strictly to Advanced).`;
+    bloomEmphasis = 'Focus on Understand and Apply levels. Tests core purpose, main functionality, and clear relationships between ideas mentioned in the transcript.';
+    toughness = 'Moderate tier: tests solid understanding of what was taught without trick questions. Clearly easier and more direct than Advanced, but deeper than Basic.';
+    comprehension = '- Test understanding of the purpose or relationship of concepts directly stated in the transcript.';
+    sentenceLengthRule = '- One clear, balanced sentence.';
+  } else if (agentProfile === 'advanced') {
+    relativeHierarchy = `DIFFICULTY TIER: LEVEL 3 of 3 (HARDEST).
+- CRITICAL RULE: Advanced MUST unambiguously be the most challenging and thought-provoking question of the three agents!
+- It tests deep analytical precision: subtle distinctions (e.g. necessary vs sufficient conditions, defining criteria vs benefits), evaluating whether a nuanced statement strictly holds, or catching subtle misconceptions.
+- Must still use only the transcript vocabulary and context, but requires the highest cognitive precision.`;
+    bloomEmphasis = 'Focus on Analyze and Evaluate levels. Tests subtle boundaries, precise necessary conditions, or evaluating subtle misconceptions.';
+    toughness = 'Hardest tier: Requires careful analytical discernment. Must be clearly more challenging than both Basic and Intermediate.';
+    comprehension = '- Test analytical precision and subtle distinction strictly within the transcript concepts.';
+    sentenceLengthRule = '- One precise, carefully crafted sentence.';
+  } else {
+    // Normal single-agent mode behavior
+    bloomEmphasis = diff === 'easy'
+      ? 'Since difficulty is EASY, lean toward the Understand and Apply levels — but still test genuine comprehension and simple inference, never rote recall.'
+      : diff === 'hard'
+        ? 'Since difficulty is HARD, skew toward the Analyze and Evaluate levels — most questions should require multi-step reasoning or spotting a subtly flawed inference.'
+        : 'For MEDIUM difficulty, balance across Understand, Apply, Analyze and Evaluate, with a slight lean toward Analyze.'
+        
+    toughness = 'Genuinely thoughtful — it must make the student reason, never go out of context.';
+    comprehension = '- Test comprehension, inference and reasoning strictly based on the session content.';
+    sentenceLengthRule = '- One sentence each. Answerable in ~15 seconds.';
+  }
+
   const typeInstructions = questionTypes.map((type, index) => {
     switch (type) {
       case 'MCQ':
-        return `${index + 1}. MCQ: One-sentence question with 4 options (A–D), exactly ONE correct; the 3 distractors must be plausible misconceptions. Mark the correct answer.`
+        if (agentProfile === 'basic') return `${index + 1}. MCQ: A direct question with 4 options testing a core definition or fact from the transcript. Exactly ONE correct.`;
+        if (agentProfile === 'intermediate') return `${index + 1}. MCQ: A question with 4 options testing how or why a concept is used in the transcript. Clear and direct, not tricky. Exactly ONE correct.`;
+        if (agentProfile === 'advanced') return `${index + 1}. MCQ: A challenging question with 4 options testing precise analysis or subtle distinctions. Exactly ONE correct; distractors should be plausible misconceptions.`;
+        return `${index + 1}. MCQ: A question with 4 options (A–D), exactly ONE correct; the 3 distractors must be plausible misconceptions drawn strictly from the transcript context. Mark the correct answer.`
       case 'TF':
-        return `${index + 1}. T/F: A single-sentence statement that is a plausible-sounding but subtly right OR subtly wrong generalization/inference. Mark the correct answer.`
+        if (agentProfile === 'basic') return `${index + 1}. T/F: A short, direct factual statement explicitly stated in the transcript. Mark whether it is True or False.`;
+        if (agentProfile === 'intermediate') return `${index + 1}. T/F: A clear statement testing the core purpose or relationship of a concept from the transcript. Mark whether it is True or False. (Do not make it a tricky edge case; keep it clearly simpler than Advanced).`;
+        if (agentProfile === 'advanced') return `${index + 1}. T/F: A challenging statement testing a subtle distinction (such as necessary condition vs outcome) using the transcript's concepts. Mark whether it is True or False.`;
+        return `${index + 1}. T/F: A statement that is plausible-sounding but subtly right OR subtly wrong based strictly on the transcript. Mark the correct answer.`
       case 'MSQ':
-        return `${index + 1}. MSQ: One-sentence question with 2–4 correct options (out of 4–5); every unmarked option must be a plausible misconception. Mark ALL correct options.`
+        return `${index + 1}. MSQ: A question with 2–4 correct options (out of 4–5); all options must be strictly within the transcript context. Mark ALL correct options.`
       default:
         return ''
     }
   }).join('\n')
 
-  // Bloom emphasis follows the teacher-set difficulty (guides the model only; never saved/shown).
-  const diff = String(difficulty || 'medium').toLowerCase()
-  const bloomEmphasis = diff === 'easy'
-    ? 'Since difficulty is EASY, lean toward the Understand and Apply levels — but still test genuine comprehension and simple inference, never rote recall.'
-    : diff === 'hard'
-      ? 'Since difficulty is HARD, skew toward the Analyze and Evaluate levels — most questions should require multi-step reasoning or spotting a subtly flawed inference.'
-      : 'For MEDIUM difficulty, balance across Understand, Apply, Analyze and Evaluate, with a slight lean toward Analyze.'
-
-  return `You are an expert educational assessment designer. Using ONLY the session content below, write ${questionTypes.length} high-quality quiz questions that test understanding and inference — NOT recall.
+  return `You are an expert educational assessment designer. Using ONLY the session content below, write ${questionTypes.length} high-quality quiz questions.
 
 SESSION CONTENT:
 ${transcript}
 
-DIFFICULTY: ${difficulty.toUpperCase()}
+${agentProfile ? `${relativeHierarchy}` : `DIFFICULTY: ${difficulty.toUpperCase()}`}
 
 QUESTION TYPES (produce exactly these, in this order):
 ${typeInstructions}
 
 HOW TO WRITE GOOD QUESTIONS:
-- One sentence each. Answerable in ~15 seconds, but genuinely tough — it must make the student reason, never a simple fact lookup or a restatement of a line.
-- Test comprehension, inference and reasoning: rephrase a concept to check real understanding; introduce a NEW example/scenario and test whether the logic still holds; ask WHY something is true or false; or present a plausible generalization that is subtly wrong.
+${sentenceLengthRule}
+- ${toughness}
+${comprehension}
 - ${bloomEmphasis} (Bloom levels only guide YOU while writing — do not label or mention them anywhere in the output.)
-- Inference beyond what is explicitly stated is encouraged, as long as it is clearly supported by the content's own logic.
-- Distractors and false statements must target REAL misconceptions: intuitive and plausible, wrong only on careful thought — never obviously wrong.
+- STRICT CONTEXT AND VOCABULARY RULE: Every question, statement, and option MUST stay strictly within the context of the transcript. The words, terminology, and concepts in the question and options MUST be taken directly from the transcript. Do NOT introduce outside topics, external domains, or hypothetical scenarios not mentioned in the transcript.
+- Distractors and false statements must be plausible within the transcript's subject matter — never obviously wrong or completely out of context.
 - The "explanation" is a brief "why" that TEACHES: state what makes the answer correct and why the tempting alternative is wrong, in one or two sentences.
 
 WORDING:
@@ -309,9 +365,8 @@ OUTPUT FORMAT (respond ONLY with valid JSON):
 IMPORTANT:
 - Respond ONLY with valid JSON, no markdown or additional text
 - Make questions clear and unambiguous
-- Base every question ONLY on the session content; use no outside knowledge
-- Honor the specified DIFFICULTY level, but never drop to pure recall
-- For MCQ, the 3 wrong options must be plausible misconceptions (wrong only on careful thought), not obviously wrong
+- Base every question ONLY on the session content; use NO outside knowledge or external domains.
+- All vocabulary, terms, and subject matter in the questions must come directly from the transcript only. Do not go out of context.
 - For MSQ, ensure at least 2 options are correct
 - Ensure all options are distinct and that ONLY the marked option(s) are correct; every unmarked option must be a plausible but genuinely incorrect distractor, with no option that could be argued as an alternative correct answer
 - For True/False questions, balance the correct answers across the set — roughly half should be correct "True" and half correct "False"; do not make most statements True (or most False)`
@@ -320,20 +375,25 @@ IMPORTANT:
 // Parse questions from AI response
 export function parseQuestions(responseText, expectedTypes) {
   try {
-    let jsonStr = responseText
+    let jsonStr = typeof responseText === 'string' ? responseText : String(responseText ?? '')
     
-    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
     if (jsonMatch) {
       jsonStr = jsonMatch[1]
     }
     
-    const objMatch = jsonStr.match(/\{[\s\S]*\}/)
-    if (!objMatch) {
-      throw new Error('No JSON found in response')
+    // Find JSON array or object
+    const match = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/)
+    if (!match) {
+      throw new Error('No JSON object or array found in response')
     }
-    
-    const parsed = JSON.parse(objMatch[0])
-    const questions = parsed.questions || []
+
+    let rawJson = match[0]
+    // Clean trailing commas before closing braces/brackets (common LLM JSON error)
+    rawJson = rawJson.replace(/,\s*([\}\]])/g, '$1')
+
+    const parsed = JSON.parse(rawJson)
+    const questions = Array.isArray(parsed) ? parsed : (parsed.questions || [])
     
     return questions.map((q, index) => ({
       id: `q_${Date.now()}_${index}`,
@@ -525,8 +585,9 @@ async function generateWithAnthropic(prompt, model = 'claude-sonnet-4-20250514')
 }
 
 // Google Gemini API call
-async function generateWithGoogle(prompt, model = 'gemini-3.6-flash') {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.googleApiKey}`, {
+async function generateWithGoogle(prompt, model = 'gemini-2.0-flash') {
+  const actualModel = (!model || model.includes('3.6') || model.includes('default')) ? 'gemini-2.0-flash' : model
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${actualModel}:generateContent?key=${config.googleApiKey}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'

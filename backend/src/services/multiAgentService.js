@@ -62,19 +62,25 @@ export function getAllAgents() {
  * @returns {Promise<Object>}  — { agentId, questions: [...], error: null } or { agentId, questions: [], error: '...' }
  */
 async function runSingleAgent(agentConfig, transcript, cfg) {
-  const { numQuestions = 1, difficulty = 'medium', questionTypes } = cfg
+  const { numQuestions = 1, difficulty = 'medium', questionTypes, provider = 'auto' } = cfg
   const startTime = Date.now()
 
   try {
-    // Build the user prompt (same prompt all agents receive — the difference is the systemInstruction)
-    const userPrompt = buildQuestionPrompt(transcript, questionTypes, difficulty)
+    let agentProfile = null;
+    if (agentConfig.agentId === 'agent_1') agentProfile = 'basic';
+    else if (agentConfig.agentId === 'agent_2') agentProfile = 'intermediate';
+    else if (agentConfig.agentId === 'agent_3') agentProfile = 'advanced';
+
+    // Build the user prompt (injecting the specific agent profile to create true variance)
+    const userPrompt = buildQuestionPrompt(transcript, questionTypes, difficulty, agentProfile)
 
     console.log(`[multi-agent] Running ${agentConfig.label} (${agentConfig.agentId})...`)
 
-    // Call Gemini with this agent's persona
+    // Call AI provider with this agent's persona
     const responseText = await callGemini({
       userPrompt,
-      systemInstruction: agentConfig.systemInstruction
+      systemInstruction: agentConfig.systemInstruction,
+      provider
     })
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
@@ -137,39 +143,57 @@ async function runSingleAgent(agentConfig, transcript, cfg) {
   }
 }
 
-// Helper: determine question types for generation
+// Helper: determine question types for generation based on settings questionTypeMix
 function resolveQuestionTypes(numQuestions, questionTypeMix) {
-  // Inline the mix logic so we don't need to import the private helpers.
-  // Each agent generates 1 question by default in multi-agent mode,
-  // so we mostly just need a single type.
   if (questionTypeMix) {
-    const { MCQ = 0, TF = 100, MSQ = 0 } = questionTypeMix
-    const total = MCQ + TF + MSQ
-    if (total <= 0) return ['MCQ']
+    const { MCQ = 0, TF = 0, MSQ = 0 } = questionTypeMix
+    const mcqVal = Number(MCQ) || 0
+    const tfVal = Number(TF) || 0
+    const msqVal = Number(MSQ) || 0
+    const total = mcqVal + tfVal + msqVal
 
-    const types = []
-    const mcqCount = Math.round((MCQ / total) * numQuestions)
-    const tfCount = Math.round((TF / total) * numQuestions)
-    const msqCount = numQuestions - mcqCount - tfCount
+    if (total > 0) {
+      if (numQuestions === 1) {
+        const r = Math.random() * total
+        if (r < mcqVal) return ['MCQ']
+        if (r < mcqVal + tfVal) return ['TF']
+        return ['MSQ']
+      }
 
-    for (let i = 0; i < mcqCount; i++) types.push('MCQ')
-    for (let i = 0; i < tfCount; i++) types.push('TF')
-    for (let i = 0; i < msqCount; i++) types.push('MSQ')
+      let mcqCount = Math.round((mcqVal / total) * numQuestions)
+      let tfCount = Math.round((tfVal / total) * numQuestions)
+      let msqCount = Math.round((msqVal / total) * numQuestions)
 
-    // Shuffle
-    for (let i = types.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [types[i], types[j]] = [types[j], types[i]]
+      let currentTotal = mcqCount + tfCount + msqCount
+      while (currentTotal < numQuestions) {
+        if (mcqVal >= tfVal && mcqVal >= msqVal) mcqCount++
+        else if (tfVal >= msqVal) tfCount++
+        else msqCount++
+        currentTotal++
+      }
+      while (currentTotal > numQuestions) {
+        if (msqCount > 0) msqCount--
+        else if (tfCount > 0) tfCount--
+        else if (mcqCount > 0) mcqCount--
+        currentTotal--
+      }
+
+      const types = []
+      for (let i = 0; i < mcqCount; i++) types.push('MCQ')
+      for (let i = 0; i < tfCount; i++) types.push('TF')
+      for (let i = 0; i < msqCount; i++) types.push('MSQ')
+
+      for (let i = types.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [types[i], types[j]] = [types[j], types[i]]
+      }
+
+      return types.slice(0, numQuestions)
     }
-
-    return types.slice(0, numQuestions)
   }
 
-  // Default: 1 question = MCQ, 2 = MCQ+TF, 3 = MCQ+TF+MSQ
-  if (numQuestions === 1) return ['MCQ']
-  if (numQuestions === 2) return ['MCQ', 'TF']
-  if (numQuestions === 3) return ['MCQ', 'TF', 'MSQ']
-  return ['MCQ']
+  // Default: MCQ
+  return Array(numQuestions).fill('MCQ')
 }
 
 /**
@@ -188,11 +212,25 @@ export async function generateMultiAgentQuestions(transcript, cfg = {}) {
     numQuestions = 1,
     difficulty = 'medium',
     questionTypeMix = null,
-    agents: requestedAgents = ['agent_1', 'agent_2', 'agent_3']
+    agents: requestedAgents = ['agent_1', 'agent_2', 'agent_3'],
+    provider = 'auto'
   } = cfg
 
   if (!transcript || transcript.trim().length === 0) {
     throw new Error('Transcript is required')
+  }
+
+  // Trim very long transcripts to avoid exhausting Gemini's tokens-per-minute quota.
+  // 10,000 words ≈ 13,000 tokens per call × 3 agents = ~39,000 input tokens.
+  // Keeping it under ~7,500 words gives each agent ~10K tokens, well within limits.
+  const MAX_WORDS = 7500
+  let trimmedTranscript = transcript.trim()
+  const wordCount = trimmedTranscript.split(/\s+/).length
+  if (wordCount > MAX_WORDS) {
+    // Keep the LAST N words (most recent content is usually most relevant)
+    const words = trimmedTranscript.split(/\s+/)
+    trimmedTranscript = words.slice(-MAX_WORDS).join(' ')
+    console.log(`[multi-agent] Transcript trimmed from ${wordCount} to ${MAX_WORDS} words (kept most recent)`)
   }
 
   // Validate requested agents
@@ -204,8 +242,8 @@ export async function generateMultiAgentQuestions(transcript, cfg = {}) {
   // Resolve question types once (same types for all agents for fair comparison)
   const questionTypes = resolveQuestionTypes(numQuestions, questionTypeMix)
 
-  console.log(`[multi-agent] Starting generation with ${validAgents.length} agent(s): ${validAgents.join(', ')}`)
-  console.log(`[multi-agent] Config: ${numQuestions} question(s) per agent, difficulty=${difficulty}, types=${questionTypes.join(',')}`)
+  console.log(`[multi-agent] Starting generation with ${validAgents.length} agent(s): ${validAgents.join(', ')} (provider=${provider})`)
+  console.log(`[multi-agent] Config: ${numQuestions} question(s) per agent, difficulty=${difficulty}, types=${questionTypes.join(',')}, words=${wordCount}`)
 
   const startTime = Date.now()
   const agentResults = {}
@@ -214,14 +252,48 @@ export async function generateMultiAgentQuestions(transcript, cfg = {}) {
   // Generate a unique batch ID so all questions from this run can be linked
   const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
-  // Run agents SEQUENTIALLY (same API key — can't parallelize without rate limits)
-  for (const agentId of validAgents) {
+  // Dynamic delay: longer transcripts use more of the TPM quota, so we wait longer
+  const INTER_AGENT_DELAY_MS = wordCount > 3000 ? 8000 : wordCount > 1000 ? 5000 : 3000
+  // Exponential backoff delays for retries
+  const RETRY_DELAYS = [6000, 15000, 30000] // 6s, 15s, 30s
+
+  console.log(`[multi-agent] Inter-agent delay: ${INTER_AGENT_DELAY_MS}ms (based on ${wordCount} words)`)
+
+  for (let i = 0; i < validAgents.length; i++) {
+    const agentId = validAgents[i]
     const agentConfig = AGENTS[agentId]
-    const result = await runSingleAgent(agentConfig, transcript, {
+
+    // Delay between agents (not before the first one)
+    if (i > 0) {
+      console.log(`[multi-agent] Waiting ${INTER_AGENT_DELAY_MS}ms before next agent...`)
+      await new Promise(resolve => setTimeout(resolve, INTER_AGENT_DELAY_MS))
+    }
+
+    let result = await runSingleAgent(agentConfig, trimmedTranscript, {
       numQuestions,
       difficulty,
-      questionTypes
+      questionTypes,
+      provider
     })
+
+    // Retry with exponential backoff on rate-limit errors (503 / 429)
+    if (result.error && (result.error.includes('503') || result.error.includes('429') || result.error.includes('high demand') || result.error.includes('UNAVAILABLE'))) {
+      for (let retry = 0; retry < RETRY_DELAYS.length; retry++) {
+        const delay = RETRY_DELAYS[retry]
+        console.log(`[multi-agent] ${agentId} hit rate limit, retry ${retry + 1}/${RETRY_DELAYS.length} in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+        result = await runSingleAgent(agentConfig, trimmedTranscript, {
+          numQuestions,
+          difficulty,
+          questionTypes,
+          provider
+        })
+        // If success or a different error, stop retrying
+        if (!result.error || (!result.error.includes('503') && !result.error.includes('429') && !result.error.includes('high demand') && !result.error.includes('UNAVAILABLE'))) {
+          break
+        }
+      }
+    }
 
     // Attach batch ID to each question
     result.questions = result.questions.map(q => ({ ...q, generationBatchId: batchId }))

@@ -97,7 +97,8 @@ router.post('/generate-multi', authorize('teacher'), requireApprovedTeacher, asy
       numQuestions = 1,          // questions per agent (default 1 for comparison)
       difficulty = 'medium',
       questionTypeMix = null,
-      agents = ['agent_1', 'agent_2', 'agent_3']  // which agents to run
+      agents = ['agent_1', 'agent_2', 'agent_3'],  // which agents to run
+      provider = 'auto'
     } = config || {}
 
     if (!transcript || transcript.trim().length === 0) {
@@ -114,13 +115,14 @@ router.post('/generate-multi', authorize('teacher'), requireApprovedTeacher, asy
       })
     }
 
-    console.log(`[generate-multi] Starting multi-agent generation: ${agents.length} agent(s), ${numQuestions} Q/agent`)
+    console.log(`[generate-multi] Starting multi-agent generation: ${agents.length} agent(s), ${numQuestions} Q/agent, provider=${provider}`)
 
     const result = await generateMultiAgentQuestions(transcript, {
       numQuestions,
       difficulty,
       questionTypeMix,
-      agents
+      agents,
+      provider
     })
 
     console.log(`[generate-multi] Complete in ${result.totalElapsed}s`)
