@@ -31,8 +31,6 @@ const MAX_COOLDOWN_MS = 10 * 60 * 1000
 const DEFAULT_COOLDOWN_MS = 60 * 1000
 // The longest wait the orchestrator should still sit through for a per-minute limit.
 export const RETRYABLE_WAIT_MS = 65 * 1000
-// The model that last succeeded is tried first.
-let lastGoodGeminiModel = null
 
 function parseRetryDelayMs(errorText) {
   const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(errorText || '')
@@ -195,17 +193,53 @@ async function callOpenAI({ userPrompt, systemInstruction, temperature = 0.7, js
   }
 }
 
+// --- Latency-aware model order + hedged requests -----------------------------------------------
+// Gemini models' speed varies hugely with load (the same long prompt took 18s on one model and
+// 130s+ on another). Instead of waiting up to the full timeout on a slow model before falling
+// back, we (1) try models in order of recently observed latency and (2) if the current attempt
+// hasn't answered after GEMINI_HEDGE_AFTER_MS, start the next model in parallel and keep
+// whichever answers first (the loser is aborted). At most MAX_IN_FLIGHT attempts run at once.
+const geminiLatencyMs = new Map()      // model -> EWMA latency in ms
+const UNKNOWN_LATENCY_MS = 20000       // neutral score for a model we haven't timed yet
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 60000
+const HEDGE_AFTER_MS = Number(process.env.GEMINI_HEDGE_AFTER_MS) || 20000
+const MAX_IN_FLIGHT = 2
+// Fallbacks once the full Flash models are out of quota. The offset (larger than any latency
+// penalty) keeps them behind all full models in the try order.
+const LITE_GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.1-flash-lite']
+const LITE_RANK_OFFSET_MS = 1_000_000
+// Models that rejected thinkingConfig (HTTP 400) — the option is dropped for them.
+const thinkingUnsupported = new Set()
+
+function noteLatency(model, ms) {
+  const prev = geminiLatencyMs.get(model)
+  geminiLatencyMs.set(model, prev == null ? ms : Math.round(prev * 0.5 + ms * 0.5))
+}
+
+// Test hook: clear all per-process model state.
+export function _resetGeminiClientState() {
+  unavailableGeminiModels.clear()
+  geminiCooldownUntil.clear()
+  geminiLatencyMs.clear()
+  thinkingUnsupported.clear()
+  for (const k of Object.keys(providerCooldownUntil)) delete providerCooldownUntil[k]
+}
+
 /**
- * Call Google Gemini API (with candidate model retry on 404)
+ * Call Google Gemini API: latency-ordered models, quota cooldowns, hedged requests.
+ * @param {string} [thinking] — 'low' asks thinking models to reason less (faster); ignored by
+ *                              models that don't support it.
  */
-async function callGoogleGeminiDirect({ userPrompt, systemInstruction, model = 'gemini-2.0-flash', temperature = 0.7, jsonMode = false, stats = null }) {
+async function callGoogleGeminiDirect({ userPrompt, systemInstruction, model = 'gemini-2.0-flash', temperature = 0.7, jsonMode = false, thinking = null, stats = null }) {
   if (!config.googleApiKey) {
     throw new Error('Google API key not configured.')
   }
 
-  const apiKeys = config.googleApiKey.split(',').map(k => k.trim()).filter(Boolean);
-
-  let lastError = null
+  const apiKeys = config.googleApiKey.split(',').map(k => k.trim()).filter(Boolean)
+  const isAnyStandard = apiKeys.some(k => k.startsWith('AIzaSy') || k.startsWith('AQ.'))
+  if (!isAnyStandard) {
+    console.warn(`[geminiClient] Warning: GOOGLE_API_KEY format might be incorrect (Google AI Studio keys start with 'AIzaSy' or 'AQ.').`)
+  }
 
   const primaryModel = resolveGoogleModel(model)
   const allModels = [
@@ -213,17 +247,22 @@ async function callGoogleGeminiDirect({ userPrompt, systemInstruction, model = '
     'gemini-flash-latest',
     'gemini-3.8-flash',
     'gemini-3.5-flash',
-    'gemini-2.0-flash',
-    'gemini-pro-latest'
+    'gemini-3-flash-preview',
+    // (gemini-2.0-flash removed: retired by Google, it only ever returned 404 and wasted the
+    // backup slot when a request was hedged.)
+    'gemini-pro-latest',
+    // Lite models: separate free quotas, slightly simpler questions — used after the full models.
+    ...LITE_GEMINI_MODELS
   ].filter((m, idx, self) => m && self.indexOf(m) === idx)
   // Skip models already known to 404; if that would leave none, probe them all again.
   const knownGood = allModels.filter(m => !unavailableGeminiModels.has(m))
-  const candidateModels = knownGood.length > 0 ? knownGood : allModels
-  if (lastGoodGeminiModel && candidateModels.includes(lastGoodGeminiModel)) {
-    candidateModels.splice(candidateModels.indexOf(lastGoodGeminiModel), 1)
-    candidateModels.unshift(lastGoodGeminiModel)
-  }
+  // Fastest first, but every full Flash model ranks ahead of every Lite model for quality.
+  const candidateModels = (knownGood.length > 0 ? knownGood : allModels)
+    .map((m, i) => ({ m, i, score: (geminiLatencyMs.get(m) ?? UNKNOWN_LATENCY_MS) + (LITE_GEMINI_MODELS.includes(m) ? LITE_RANK_OFFSET_MS : 0) }))
+    .sort((a, b) => a.score - b.score || a.i - b.i)
+    .map(x => x.m)
 
+  let lastError = null
   let attempted = 0
   let soonestRetryAt = Infinity       // any cooled-down model
   let soonestRateRetryAt = Infinity   // a model that is only per-minute limited (worth waiting for)
@@ -232,122 +271,177 @@ async function callGoogleGeminiDirect({ userPrompt, systemInstruction, model = '
     if (kind === 'rate') soonestRateRetryAt = Math.min(soonestRateRetryAt, until)
   }
 
+  // Build the attempt queue, skipping (key, model) pairs that are cooling down after a 429.
+  const queue = []
   for (const targetModel of candidateModels) {
     for (const currentKey of apiKeys) {
       const pair = `${currentKey}|${targetModel}`
       const cd = geminiCooldownUntil.get(pair)
-      if (cd && cd.until > Date.now()) {
-        noteCooldown(cd)
-        continue // this model is out of quota on this key — don't spend a request on it
-      }
-      attempted++
-
-      const isStandardKey = currentKey.startsWith('AIzaSy') || currentKey.startsWith('AQ.');
-      if (!isStandardKey) {
-        console.warn(`[geminiClient] Warning: GOOGLE_API_KEY format might be incorrect (Key starts with '${currentKey.substring(0, 8)}...').`);
-      }
-
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${currentKey}`
-
-      const body = {
-        contents: [{ parts: [{ text: userPrompt }] }],
-        generationConfig: {
-          temperature,
-          maxOutputTokens: 8000
-        }
-      }
-      if (jsonMode) body.generationConfig.responseMimeType = 'application/json'
-
-      if (systemInstruction && systemInstruction.trim().length > 0) {
-        body.systemInstruction = {
-          parts: [{ text: systemInstruction }]
-        }
-      }
-
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 60_000)
-
-      try {
-        countRequest(stats)
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal
-        })
-        clearTimeout(timeoutId)
-
-        if (!response.ok) {
-          const errorData = await response.text().catch(() => '')
-          if (response.status === 404) {
-            console.warn(`[geminiClient] Model ${targetModel} returned 404 Not Found for key ${currentKey.substring(0, 8)}..., trying next...`)
-            lastError = new Error(`Gemini API error (404): ${errorData.substring(0, 300)}`)
-            unavailableGeminiModels.add(targetModel)
-            break // 404 means model not found, changing key usually won't help if they are same tier, but we break to next model
-          }
-          if (response.status === 429) {
-            const { kind, cooldownMs } = classifyGemini429(errorData)
-            const cd = { until: Date.now() + cooldownMs, kind }
-            geminiCooldownUntil.set(pair, cd)
-            noteCooldown(cd)
-            console.warn(`[geminiClient] ${targetModel} ${kind === 'rate' ? 'per-minute rate-limited' : 'out of quota'} for key ${currentKey.substring(0, 8)}...; skipping it for ${Math.round(cooldownMs / 1000)}s`)
-          }
-          throw new Error(`Gemini API error (${response.status}): ${errorData.substring(0, 500)}`)
-        }
-
-        const data = await response.json()
-        recordUsage(stats, data.usageMetadata?.promptTokenCount, data.usageMetadata?.candidatesTokenCount)
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-
-        if (!text) {
-          const finishReason = data.candidates?.[0]?.finishReason || 'UNKNOWN'
-          throw new Error(`Gemini returned empty response (finishReason: ${finishReason})`)
-        }
-
-        console.log(`[geminiClient] Successfully generated questions with model: ${targetModel}`)
-        lastGoodGeminiModel = targetModel
-        return text
-      } catch (err) {
-        clearTimeout(timeoutId)
-        if (err.name === 'AbortError') {
-          console.warn(`[geminiClient] Request timed out for key ${currentKey.substring(0, 8)}...`)
-          lastError = new Error('Gemini API request timed out after 60s')
-          continue // Try next key
-        }
-        if (err.message && (err.message.includes('503') || err.message.includes('429'))) {
-          console.warn(`[geminiClient] Rate limit/High demand on key ${currentKey.substring(0, 8)}... trying next key...`)
-          lastError = err
-          continue // Try next key
-        }
-        if (err.message && err.message.includes('404')) {
-          // handled above, break inner loop to try next model
-          break
-        }
-        throw err
-      }
+      if (cd && cd.until > Date.now()) { noteCooldown(cd); continue }
+      queue.push({ model: targetModel, key: currentKey, pair })
     }
   }
 
-  const isAnyStandard = apiKeys.some(k => k.startsWith('AIzaSy') || k.startsWith('AQ.'));
-  if (!isAnyStandard) {
-    throw new Error(`Invalid GOOGLE_API_KEY format. Google AI Studio keys generally start with 'AIzaSy' or 'AQ.'.`)
+  const buildBody = (targetModel) => {
+    const body = {
+      contents: [{ parts: [{ text: userPrompt }] }],
+      generationConfig: { temperature, maxOutputTokens: 8000 }
+    }
+    if (jsonMode) body.generationConfig.responseMimeType = 'application/json'
+    if (thinking && !thinkingUnsupported.has(targetModel)) {
+      body.generationConfig.thinkingConfig = { thinkingLevel: thinking }
+    }
+    if (systemInstruction && systemInstruction.trim().length > 0) {
+      body.systemInstruction = { parts: [{ text: systemInstruction }] }
+    }
+    return body
   }
 
-  // A model is only per-minute limited and frees up soon: report a RETRYABLE 429 with the wait,
-  // so the orchestrator sleeps that long and retries instead of failing the agent.
-  const rateWaitMs = soonestRateRetryAt - Date.now()
-  if (soonestRateRetryAt !== Infinity && rateWaitMs <= RETRYABLE_WAIT_MS) {
-    throw new Error(`Gemini API error (429): rate-limited (retry in ~${Math.max(1, Math.ceil(rateWaitMs / 1000))}s)`)
+  // One request. Resolves with text, or rejects with err.kind:
+  // timeout | notfound | quota | busy | thinking | other  (or 'cancelled' when another attempt won).
+  const runAttempt = async (t, controller) => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${t.model}:generateContent?key=${t.key}`
+    const body = buildBody(t.model)
+    let timedOut = false
+    const timeoutId = setTimeout(() => { timedOut = true; controller.abort() }, GEMINI_TIMEOUT_MS)
+    const started = Date.now()
+    const fail = (kind, message) => Object.assign(new Error(message), { kind })
+    try {
+      countRequest(stats)
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      })
+      if (!response.ok) {
+        const errorData = await response.text().catch(() => '')
+        if (response.status === 404) throw fail('notfound', `Gemini API error (404): ${errorData.substring(0, 300)}`)
+        if (response.status === 429) {
+          const { kind, cooldownMs } = classifyGemini429(errorData)
+          const cd = { until: Date.now() + cooldownMs, kind }
+          geminiCooldownUntil.set(t.pair, cd)
+          noteCooldown(cd)
+          console.warn(`[geminiClient] ${t.model} ${kind === 'rate' ? 'per-minute rate-limited' : 'out of quota'} for key ${t.key.substring(0, 8)}...; skipping it for ${Math.round(cooldownMs / 1000)}s`)
+          throw fail('quota', `Gemini API error (429): ${errorData.substring(0, 500)}`)
+        }
+        if (response.status === 400 && body.generationConfig.thinkingConfig && /thinking/i.test(errorData)) {
+          throw fail('thinking', `Gemini API error (400): thinkingConfig not supported by ${t.model}`)
+        }
+        if (response.status === 503) throw fail('busy', `Gemini API error (503): ${errorData.substring(0, 300)}`)
+        throw fail('other', `Gemini API error (${response.status}): ${errorData.substring(0, 500)}`)
+      }
+
+      const data = await response.json()
+      recordUsage(stats, data.usageMetadata?.promptTokenCount, data.usageMetadata?.candidatesTokenCount)
+      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || ''
+      if (!text) {
+        const finishReason = data.candidates?.[0]?.finishReason || 'UNKNOWN'
+        throw fail('other', `Gemini returned empty response (finishReason: ${finishReason})`)
+      }
+      const elapsed = Date.now() - started
+      noteLatency(t.model, elapsed)
+      console.log(`[geminiClient] Successfully generated questions with model: ${t.model} in ${(elapsed / 1000).toFixed(1)}s`)
+      return text
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        if (!timedOut) throw Object.assign(new Error('cancelled'), { kind: 'cancelled' })
+        noteLatency(t.model, GEMINI_TIMEOUT_MS)
+        throw Object.assign(new Error(`Gemini API request timed out after ${Math.round(GEMINI_TIMEOUT_MS / 1000)}s`), { kind: 'timeout' })
+      }
+      if (!err.kind) err.kind = 'other' // network error etc.
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+    }
   }
 
-  // Every model is out of quota (daily limit / not available on this tier): fail fast without
-  // spending requests, and without a 429 so the caller doesn't sit through pointless retries.
-  if (attempted === 0 && soonestRetryAt !== Infinity) {
-    const waitS = Math.ceil((soonestRetryAt - Date.now()) / 1000)
-    throw new Error(`Gemini quota exhausted on all models for this key (next retry in ~${waitS}s)`)
+  const finalError = () => {
+    // A model is only per-minute limited and frees up soon: report a RETRYABLE 429 with the wait,
+    // so the orchestrator sleeps that long and retries instead of failing the agent.
+    const rateWaitMs = soonestRateRetryAt - Date.now()
+    if (soonestRateRetryAt !== Infinity && rateWaitMs <= RETRYABLE_WAIT_MS) {
+      return new Error(`Gemini API error (429): rate-limited (retry in ~${Math.max(1, Math.ceil(rateWaitMs / 1000))}s)`)
+    }
+    // Every model is out of quota (daily limit / not available on this tier): fail fast without
+    // spending requests, and without a 429 so the caller doesn't sit through pointless retries.
+    if (attempted === 0 && soonestRetryAt !== Infinity) {
+      const waitS = Math.ceil((soonestRetryAt - Date.now()) / 1000)
+      return new Error(`Gemini quota exhausted on all models for this key (next retry in ~${waitS}s)`)
+    }
+    if (!isAnyStandard) {
+      return new Error(`Invalid GOOGLE_API_KEY format. Google AI Studio keys generally start with 'AIzaSy' or 'AQ.'.`)
+    }
+    return lastError || new Error('All Gemini model candidates returned 404 Not Found')
   }
 
-  throw lastError || new Error('All Gemini model candidates returned 404 Not Found')
+  return new Promise((resolve, reject) => {
+    let inFlight = 0
+    let settled = false
+    let hedgeTimer = null
+    const controllers = new Set()
+
+    const finish = (fn) => {
+      if (settled) return
+      settled = true
+      clearTimeout(hedgeTimer)
+      for (const c of controllers) c.abort() // cancel the slower attempt
+      fn()
+    }
+
+    const launchNext = () => {
+      if (settled) return
+      clearTimeout(hedgeTimer)
+      if (queue.length === 0) {
+        if (inFlight === 0) finish(() => reject(finalError()))
+        return
+      }
+      if (inFlight >= MAX_IN_FLIGHT) return
+      const t = queue.shift()
+      inFlight++
+      attempted++
+      const controller = new AbortController()
+      controllers.add(controller)
+
+      runAttempt(t, controller)
+        .then(text => finish(() => resolve(text)))
+        .catch(err => {
+          controllers.delete(controller)
+          inFlight--
+          if (settled || err.kind === 'cancelled') return
+          lastError = err
+          if (err.kind === 'notfound') {
+            console.warn(`[geminiClient] Model ${t.model} returned 404 Not Found, trying next...`)
+            unavailableGeminiModels.add(t.model)
+            // Same model on other keys won't exist either.
+            for (let i = queue.length - 1; i >= 0; i--) if (queue[i].model === t.model) queue.splice(i, 1)
+          } else if (err.kind === 'thinking') {
+            thinkingUnsupported.add(t.model)
+            queue.unshift(t) // retry the same model without thinkingConfig
+          } else if (err.kind === 'busy') {
+            noteLatency(t.model, GEMINI_TIMEOUT_MS / 2) // high demand — deprioritize for a while
+            console.warn(`[geminiClient] ${t.model} is busy (503), trying next...`)
+          } else if (err.kind === 'timeout') {
+            console.warn(`[geminiClient] ${t.model} timed out, trying next...`)
+          } else if (err.kind === 'other') {
+            console.warn(`[geminiClient] ${t.model} failed: ${err.message.slice(0, 160)}`)
+          }
+          launchNext()
+        })
+
+      // Still waiting after HEDGE_AFTER_MS? Start a backup attempt on the next model.
+      if (queue.length > 0) {
+        hedgeTimer = setTimeout(() => {
+          if (!settled && queue.length > 0) {
+            console.log(`[geminiClient] ${t.model} slow (>${Math.round(HEDGE_AFTER_MS / 1000)}s); starting backup on ${queue[0].model}`)
+            launchNext()
+          }
+        }, HEDGE_AFTER_MS)
+      }
+    }
+
+    launchNext()
+  })
 }
 
 /**
@@ -404,6 +498,7 @@ async function callAnthropic({ userPrompt, systemInstruction, temperature = 0.7,
  * Optional, backward-compatible extras:
  *   temperature — defaults to 0.7 (unchanged); the evaluator uses a low value for consistency
  *   jsonMode    — ask providers that support it (Gemini, OpenAI) for a JSON-only response
+ *   thinking    — 'low' asks Gemini thinking models to reason less (faster); others ignore it
  *   stats       — object that accumulates { requests, inputTokens, outputTokens } for measurement
  */
 export async function callGemini({
@@ -413,12 +508,13 @@ export async function callGemini({
   provider = 'auto',
   temperature = 0.7,
   jsonMode = false,
+  thinking = null,
   stats = null
 }) {
   if (!userPrompt || userPrompt.trim().length === 0) {
     throw new Error('userPrompt is required')
   }
-  const opts = { userPrompt, systemInstruction, temperature, jsonMode, stats }
+  const opts = { userPrompt, systemInstruction, temperature, jsonMode, thinking, stats }
 
   // Explicit provider requested
   if (provider === 'minimax') return callMiniMax(opts)

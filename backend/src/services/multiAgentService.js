@@ -144,7 +144,11 @@ async function runSingleAgent(agentConfig, transcript, cfg) {
 // Exponential backoff delays for rate-limit retries (3s, 8s, 20s) plus up to 1s of jitter so
 // concurrently running agents don't retry in lock-step.
 const RETRY_DELAYS = [3000, 8000, 20000]
-// Delay before the evaluator's single retry (overridable so tests don't wait).
+// A 503 "high demand" is a momentary load spike that comes back in ~2s, not a quota limit, so it
+// gets short waits. (With the long schedule above, three 503s alone added ~33s to a long paste.)
+const BUSY_RETRY_DELAYS = [1500, 3000, 6000]
+const isBusyError = (msg) => !!msg && !msg.includes('429') && /503|high demand|UNAVAILABLE/.test(msg)
+// Delay before the evaluator's retry (overridable so tests don't wait).
 const EVALUATOR_RETRY_MS = Number(process.env.EVALUATOR_RETRY_MS) || 3000
 
 // Total time one agent may spend waiting between retries, so a long rate-limit wait can't push the
@@ -177,7 +181,8 @@ async function runAgentWithRetry(agentConfig, transcript, cfg) {
   }
   let waited = 0
   for (let retry = 0; retry < RETRY_DELAYS.length && isRateLimitError(result.error); retry++) {
-    const delay = retryDelayFor(result.error, RETRY_DELAYS[retry])
+    const schedule = isBusyError(result.error) ? BUSY_RETRY_DELAYS : RETRY_DELAYS
+    const delay = retryDelayFor(result.error, schedule[retry])
     if (waited + delay > MAX_RETRY_WAIT_MS) {
       console.warn(`[multi-agent] ${agentConfig.agentId} rate-limited; next wait ${delay}ms would exceed the ${MAX_RETRY_WAIT_MS}ms retry budget — giving up`)
       break
@@ -363,16 +368,22 @@ export async function generateMultiAgentQuestions(transcript, cfg = {}, deps = {
           provider,
           temperature: 0.2,
           jsonMode: true,
+          thinking: 'low', // scoring needs little deliberation; keeps Agent 4 fast
           stats
         })
-        try {
-          return await call()
-        } catch (err) {
-          if (!isRateLimitError(err.message)) throw err
-          const delay = Math.min(retryDelayFor(err.message, EVALUATOR_RETRY_MS), MAX_RETRY_WAIT_MS)
-          console.log(`[multi-agent] Evaluator hit rate limit, retrying once in ${delay}ms...`)
-          await sleep(delay)
-          return call()
+        // Up to 2 quick retries for a 503 spike; 1 retry (honouring the provider's wait) for a 429.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await call()
+          } catch (err) {
+            const busy = isBusyError(err.message)
+            if (!isRateLimitError(err.message) || attempt >= (busy ? 2 : 1)) throw err
+            const delay = busy
+              ? BUSY_RETRY_DELAYS[attempt] + Math.floor(Math.random() * 500)
+              : Math.min(retryDelayFor(err.message, EVALUATOR_RETRY_MS), MAX_RETRY_WAIT_MS)
+            console.log(`[multi-agent] Evaluator ${busy ? 'got 503 (busy)' : 'hit rate limit'}, retry ${attempt + 1} in ${delay}ms...`)
+            await sleep(delay)
+          }
         }
       }
     })
@@ -380,6 +391,7 @@ export async function generateMultiAgentQuestions(transcript, cfg = {}, deps = {
     evaluatorMeta = meta
     if (meta.error) console.warn(`[multi-agent] Evaluator unavailable: ${meta.error}`)
     console.log(`[multi-agent] Evaluator returned ${evaluatorResults.length} slot result(s) in ${meta.elapsed}s ` +
+      `on ${meta.contextWords} words${meta.excerpted ? ' (relevant excerpts)' : ''} ` +
       `(${evaluatorResults.map(r => `${r.questionIndex}:${r.status}${r.recommendedAgentId ? '→' + r.recommendedAgentId : ''}`).join(', ')})`)
   } else {
     console.warn('[multi-agent] Skipping evaluator — all generator agents failed.')

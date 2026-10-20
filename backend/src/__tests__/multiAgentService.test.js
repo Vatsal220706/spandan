@@ -14,8 +14,8 @@ const makeQuestion = (type, n, tag) => type === 'TF'
 // Reads the requested types from the prompt ("1. MCQ: ...", "2. T/F: ...") and answers them.
 const requestedTypes = (prompt) => [...prompt.matchAll(/^\d+\. (MCQ|T\/F|MSQ):/gm)].map(m => (m[1] === 'T/F' ? 'TF' : m[1]))
 
-function makeStub({ extra = 0, failAgent = null, rateLimitAgentOnce = null, timeoutAgentTimes = 0, timeoutAgent = null, evaluatorFails = false, evaluatorFailsOnce = false, latencyMs = 30 } = {}) {
-  const state = { inFlight: 0, maxInFlight: 0, calls: [], evaluatorAttempts: 0, rateLimited: 0, timeouts: 0 }
+function makeStub({ extra = 0, failAgent = null, rateLimitAgentOnce = null, timeoutAgentTimes = 0, timeoutAgent = null, busyAgent = null, busyAgentTimes = 0, evaluatorFails = false, evaluatorFailsOnce = false, latencyMs = 30 } = {}) {
+  const state = { inFlight: 0, maxInFlight: 0, calls: [], evaluatorAttempts: 0, rateLimited: 0, timeouts: 0, busy: 0 }
   const callModel = async ({ userPrompt, systemInstruction }) => {
     state.inFlight++
     state.maxInFlight = Math.max(state.maxInFlight, state.inFlight)
@@ -31,6 +31,10 @@ function makeStub({ extra = 0, failAgent = null, rateLimitAgentOnce = null, time
       const tag = /Agent (\d)/.exec(systemInstruction)?.[1]
       state.calls.push(`agent_${tag}`)
       if (failAgent === `agent_${tag}`) throw new Error('boom')
+      if (busyAgent === `agent_${tag}` && state.busy < busyAgentTimes) {
+        state.busy++
+        throw new Error('All available AI providers failed:\nGoogle: Gemini API error (503): This model is currently experiencing high demand.')
+      }
       if (timeoutAgent === `agent_${tag}` && state.timeouts < timeoutAgentTimes) {
         state.timeouts++
         throw new Error('All available AI providers failed:\nGoogle: Gemini API request timed out after 60s')
@@ -105,6 +109,16 @@ describe('generateMultiAgentQuestions', () => {
     expect(res.agentResults.agent_3.error).toBeNull()
     expect(res.agentResults.agent_3.questions).toHaveLength(3)
   })
+
+  it('retries 503 "high demand" errors on a short schedule', async () => {
+    const { callModel, state } = makeStub({ busyAgent: 'agent_3', busyAgentTimes: 2 })
+    const t0 = Date.now()
+    const res = await generateMultiAgentQuestions(transcript, { numQuestions: 3 }, { callModel })
+    expect(state.busy).toBe(2)
+    expect(res.agentResults.agent_3.questions).toHaveLength(3)
+    // 1.5s + 3s (+ jitter) — the old 3s + 8s schedule would take 11s+.
+    expect(Date.now() - t0).toBeLessThan(8000)
+  }, 10000)
 
   it('retries a timed-out Advanced agent once and recovers', async () => {
     const { callModel, state } = makeStub({ timeoutAgent: 'agent_3', timeoutAgentTimes: 1 })

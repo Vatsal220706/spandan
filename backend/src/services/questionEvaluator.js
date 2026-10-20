@@ -144,11 +144,76 @@ function shuffle(arr, rng = Math.random) {
   return a
 }
 
+// Above this size the evaluator gets only the passages relevant to the candidates instead of the
+// whole transcript — re-reading ~7,500 words made the evaluation step take ~50s on long inputs.
+export const EVAL_CONTEXT_MAX_WORDS = 1800
+const PASSAGES_PER_CANDIDATE = 6
+
+function splitPassages(transcript) {
+  const sentences = String(transcript).split(/(?<=[.!?])\s+/).filter(s => s.trim())
+  const out = []
+  for (const s of sentences) {
+    const words = s.split(/\s+/)
+    if (words.length <= 80) { out.push(s); continue }
+    // Unpunctuated speech: fall back to ~40-word windows.
+    for (let i = 0; i < words.length; i += 40) out.push(words.slice(i, i + 40).join(' '))
+  }
+  return out
+}
+
+/**
+ * The text the evaluator judges against. Short transcripts are sent whole. Long ones are reduced
+ * to, for each candidate, the passages sharing the most words with it (plus one neighbour on each
+ * side for context), kept in original order and capped at EVAL_CONTEXT_MAX_WORDS. Evidence
+ * quotes are still verified against the FULL transcript.
+ */
+export function buildEvaluationContext(transcript, candidates, maxWords = EVAL_CONTEXT_MAX_WORDS) {
+  const text = String(transcript || '')
+  if (text.split(/\s+/).length <= maxWords) return { context: text, excerpted: false }
+
+  const passages = splitPassages(text)
+  const passageTokens = passages.map(p => new Set(tokenize(p)))
+  const priority = new Map() // passage index -> best rank (lower = more important)
+
+  for (const c of candidates) {
+    const q = c.question || {}
+    const terms = new Set(tokenize(`${q.question || ''} ${(q.options || []).map(o => o.text).join(' ')} ${q.explanation || ''}`))
+    if (terms.size === 0) continue
+    const ranked = passageTokens
+      .map((set, i) => { let hit = 0; for (const w of terms) if (set.has(w)) hit++; return { i, hit } })
+      .filter(x => x.hit > 0)
+      .sort((a, b) => b.hit - a.hit || a.i - b.i)
+      .slice(0, PASSAGES_PER_CANDIDATE)
+    ranked.forEach(({ i }, rank) => {
+      for (const j of [i, i - 1, i + 1]) {
+        if (j < 0 || j >= passages.length) continue
+        const r = j === i ? rank : rank + 0.5 // neighbours rank just below their anchor
+        if (!priority.has(j) || priority.get(j) > r) priority.set(j, r)
+      }
+    })
+  }
+
+  // Keep the most important passages within the word budget, then restore original order.
+  const chosen = []
+  let words = 0
+  for (const [i] of [...priority.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0])) {
+    const n = passages[i].split(/\s+/).length
+    if (words + n > maxWords) continue
+    chosen.push(i)
+    words += n
+  }
+  if (chosen.length === 0) return { context: text.split(/\s+/).slice(-maxWords).join(' '), excerpted: true }
+  chosen.sort((a, b) => a - b)
+  const context = chosen.map((i, k) => (k > 0 && i !== chosen[k - 1] + 1 ? '… ' : '') + passages[i]).join(' ')
+  return { context, excerpted: true }
+}
+
 /**
  * Build the single evaluation prompt. Only structurally valid candidates are sent.
+ * @param {boolean} [excerpted] — true when `transcript` holds relevant excerpts, not the full text
  * @returns {{ prompt: string|null, idToKey: Object, order: Object }}
  */
-export function buildEvaluationPrompt(candidates, transcript, rng = Math.random) {
+export function buildEvaluationPrompt(candidates, transcript, rng = Math.random, excerpted = false) {
   const sendable = shuffle(candidates.filter(c => !hasHardFlag(c.structuralFlags)), rng)
   const idToKey = {}
   const order = {}
@@ -168,7 +233,7 @@ ${opts}
 Explanation: ${q.explanation || 'N/A'}`
   }).join('\n\n')
 
-  const prompt = `SESSION CONTENT:
+  const prompt = `SESSION CONTENT${excerpted ? ' (the passages of a longer session most relevant to these candidates; "…" marks skipped parts)' : ''}:
 ${transcript}
 
 CANDIDATES (${sendable.length}):
@@ -336,7 +401,8 @@ export async function evaluateCandidates({ agentResults, questionTypes, transcri
   const start = Date.now()
   const numSlots = questionTypes.length
   const candidates = buildCandidates(agentResults, questionTypes)
-  const { prompt, idToKey, order } = buildEvaluationPrompt(candidates, transcript, rng)
+  const { context, excerpted } = buildEvaluationContext(transcript, candidates)
+  const { prompt, idToKey, order } = buildEvaluationPrompt(candidates, context, rng, excerpted)
 
   let rawByKey = {}
   let error = null
@@ -403,7 +469,9 @@ export async function evaluateCandidates({ agentResults, questionTypes, transcri
     meta: {
       elapsed: ((Date.now() - start) / 1000).toFixed(1),
       error,
-      evaluatedCount: rawByKey ? Object.keys(rawByKey).length : 0
+      evaluatedCount: rawByKey ? Object.keys(rawByKey).length : 0,
+      contextWords: context.split(/\s+/).length,
+      excerpted
     }
   }
 }

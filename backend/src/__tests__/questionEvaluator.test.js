@@ -9,6 +9,7 @@ import {
   parseEvaluation,
   evidenceInTranscript,
   evaluateCandidates,
+  buildEvaluationContext,
   similarity
 } from '../services/questionEvaluator.js'
 
@@ -192,6 +193,34 @@ describe('evaluateCandidates — quality over difficulty', () => {
     const { results: recs } = await run({ [q]: ok, [q + ' ']: ok }, results)
     const [c1, c3] = recs[0].candidates
     expect(c1.score).toBe(c3.score)
+  })
+})
+
+describe('buildEvaluationContext', () => {
+  const filler = (n) => Array.from({ length: n }, (_, i) => `Filler sentence number ${i} talks about unrelated logistics and scheduling.`).join(' ')
+  const key = 'The Calvin cycle fixes carbon dioxide into sugar inside the stroma.'
+
+  it('sends short transcripts whole', () => {
+    const { context, excerpted } = buildEvaluationContext(transcript, [])
+    expect(context).toBe(transcript)
+    expect(excerpted).toBe(false)
+  })
+
+  it('reduces long transcripts to the passages relevant to each candidate, within the budget', () => {
+    const long = `${filler(400)} ${key} ${filler(400)}`
+    const cand = { question: mcq('What does the Calvin cycle fix into sugar in the stroma?') }
+    const { context, excerpted } = buildEvaluationContext(long, [cand], 300)
+    expect(excerpted).toBe(true)
+    expect(context).toContain(key)
+    expect(context.split(/\s+/).length).toBeLessThanOrEqual(300)
+  })
+
+  it('handles unpunctuated speech by windowing it', () => {
+    const long = Array(3000).fill('word').join(' ') + ' calvin cycle fixes carbon ' + Array(3000).fill('word').join(' ')
+    const cand = { question: mcq('What does the calvin cycle fix?') }
+    const { context } = buildEvaluationContext(long, [cand], 200)
+    expect(context).toMatch(/calvin cycle fixes carbon/)
+    expect(context.split(/\s+/).length).toBeLessThanOrEqual(200)
   })
 })
 
