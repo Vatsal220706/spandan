@@ -10,15 +10,45 @@ import QuestionEditor from './QuestionEditor'
  * then clicks "Next" to see question[1], etc.
  *
  * Props:
- *   agentResults   — { agent_1: { questions, label, color, icon, error, elapsed }, ... }
- *   onApprove      — (question, agentInfo) => void — called when teacher selects & launches
- *   onClose        — () => void
- *   onRegenerate   — () => void — re-run all agents
- *   isRegenerating — boolean
- *   roomSettings   — { timeToAnswer, points, ... }
+ *   agentResults      — { agent_1: { questions, label, color, icon, error, elapsed }, ... }
+ *   evaluatorResults  — [{ questionIndex, status, recommendedAgentId, score, reasoning, agentLabel, agentColor,
+ *                          agentIcon, candidates: [{ agentId, verdict, score, flags, note, ... }] }]
+ *                       status: 'recommended' | 'needs_review' | 'no_good_candidate' | 'unavailable'
+ *   transcriptInfo    — { wordCount, truncated, usedWords } (optional)
+ *   onApprove         — (question, agentInfo) => void — called when teacher selects & launches
+ *   onClose           — () => void
+ *   onRegenerate      — () => void — re-run all agents
+ *   isRegenerating    — boolean
+ *   roomSettings      — { timeToAnswer, points, ... }
  */
+
+// Short teacher-facing labels for the evaluator's flags.
+const FLAG_LABELS = {
+  empty_question: 'Missing question text',
+  placeholder_options: 'Placeholder options',
+  wrong_option_count: 'Wrong number of options',
+  no_correct_option: 'No correct answer marked',
+  multiple_correct_options: 'More than one correct answer',
+  too_few_correct_options: 'MSQ needs 2+ correct answers',
+  duplicate_options: 'Duplicate options',
+  type_mismatch: 'Different type than requested',
+  invalid_answer: 'Answer key looks wrong',
+  not_grounded: 'Not supported by the content',
+  evidence_not_found: 'No supporting quote found',
+  not_evaluated: 'Not evaluated'
+}
+
+const VERDICT_STYLE = {
+  recommended: { label: 'Recommended', color: '#f59e0b' },
+  acceptable: { label: 'Good', color: '#10b981' },
+  needs_review: { label: 'Review', color: '#f97316' },
+  rejected: { label: 'Not recommended', color: '#ef4444' }
+}
+
 function MultiAgentQuestionPopup({
   agentResults = {},
+  evaluatorResults = [],
+  transcriptInfo = null,
   onApprove,
   onClose,
   onRegenerate,
@@ -65,6 +95,22 @@ function MultiAgentQuestionPopup({
   const isCurrentLaunched = launchedIndices.has(currentIndex)
   const isLastQuestion = currentIndex >= totalQuestions - 1
   const allDone = launchedIndices.size >= totalQuestions
+
+  // Evaluator recommendation for the current question index
+  const currentRecommendation = evaluatorResults.find(r => r.questionIndex === currentIndex) || null
+  // Older responses had no status; treat a recommendation with an agent id as 'recommended'.
+  const recStatus = currentRecommendation?.status || (currentRecommendation?.recommendedAgentId ? 'recommended' : null)
+  const hasPick = !!currentRecommendation?.recommendedAgentId &&
+    (recStatus === 'recommended' || recStatus === 'needs_review')
+  const getCandidateEval = (agentId) =>
+    currentRecommendation?.candidates?.find(c => c.agentId === agentId) || null
+
+  // Auto-select the evaluator's recommendation
+  const handleUseRecommendation = () => {
+    if (hasPick && !isCurrentLaunched) {
+      setSelectedAgent(currentRecommendation.recommendedAgentId)
+    }
+  }
 
   // Get the question for an agent at the current index
   const getQuestion = (agentId) => {
@@ -304,6 +350,143 @@ function MultiAgentQuestionPopup({
           </div>
         )}
 
+        {/* Long-input notice: the agents only saw the most recent part of the text */}
+        {transcriptInfo?.truncated && (
+          <div style={{
+            marginBottom: '12px',
+            padding: '8px 14px',
+            borderRadius: '10px',
+            background: 'var(--bg-secondary, #2a2a3e)',
+            fontSize: '12px',
+            color: 'var(--text-secondary, #999)'
+          }}>
+            ℹ️ The text was long ({transcriptInfo.wordCount.toLocaleString()} words), so questions were generated from the most recent {transcriptInfo.usedWords.toLocaleString()} words.
+          </div>
+        )}
+
+        {/* Evaluator: no usable recommendation for this question */}
+        {currentRecommendation && !hasPick && (
+          <div style={{
+            marginBottom: '18px',
+            padding: '14px 18px',
+            borderRadius: '12px',
+            background: recStatus === 'unavailable' ? 'var(--bg-secondary, #2a2a3e)' : '#ef444410',
+            border: recStatus === 'unavailable' ? '1.5px solid var(--border-color, #333)' : '1.5px solid #ef444440',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px'
+          }}>
+            <div style={{ fontSize: '22px', flexShrink: 0, marginTop: '1px' }}>
+              {recStatus === 'unavailable' ? 'ℹ️' : '⚠️'}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontSize: '12px',
+                fontWeight: '700',
+                color: recStatus === 'unavailable' ? 'var(--text-secondary, #999)' : '#ef4444',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                marginBottom: '5px'
+              }}>
+                {recStatus === 'unavailable' ? 'AI Evaluator Unavailable' : 'No Strong Candidate'}
+              </div>
+              <p style={{ margin: 0, fontSize: '13px', color: 'var(--text-secondary, #bbb)', lineHeight: '1.5' }}>
+                {currentRecommendation.reasoning}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Evaluator Recommendation Banner */}
+        {currentRecommendation && hasPick && (
+          <div style={{
+            marginBottom: '18px',
+            padding: '14px 18px',
+            borderRadius: '12px',
+            background: 'linear-gradient(135deg, #f59e0b12, #f59e0b06)',
+            border: `1.5px solid #f59e0b50`,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px'
+          }}>
+            {/* Star icon */}
+            <div style={{
+              fontSize: '22px',
+              flexShrink: 0,
+              marginTop: '1px'
+            }}>⭐</div>
+
+            {/* Recommendation text */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                marginBottom: '5px',
+                flexWrap: 'wrap'
+              }}>
+                <span style={{
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  color: '#f59e0b',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em'
+                }}>{recStatus === 'needs_review' ? 'Best Available — Review Before Launching' : 'AI Evaluator Recommends'}</span>
+                <span style={{
+                  padding: '2px 10px',
+                  borderRadius: '20px',
+                  background: `${currentRecommendation.agentColor}22`,
+                  border: `1px solid ${currentRecommendation.agentColor}60`,
+                  color: currentRecommendation.agentColor,
+                  fontSize: '12px',
+                  fontWeight: '700'
+                }}>
+                  {currentRecommendation.agentIcon} {currentRecommendation.agentLabel}
+                </span>
+                {typeof currentRecommendation.score === 'number' && (
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary, #999)' }}>
+                    Score {currentRecommendation.score}/100
+                  </span>
+                )}
+              </div>
+              <p style={{
+                margin: 0,
+                fontSize: '13px',
+                color: 'var(--text-secondary, #bbb)',
+                lineHeight: '1.5'
+              }}>
+                {currentRecommendation.reasoning}
+              </p>
+            </div>
+
+            {/* Use Recommendation button */}
+            {!isCurrentLaunched && (
+              <button
+                onClick={handleUseRecommendation}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: selectedAgent === currentRecommendation.recommendedAgentId
+                    ? '#f59e0b'
+                    : '#f59e0b20',
+                  color: selectedAgent === currentRecommendation.recommendedAgentId
+                    ? 'white'
+                    : '#f59e0b',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                  transition: 'all 0.2s ease',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {selectedAgent === currentRecommendation.recommendedAgentId ? '✓ Selected' : 'Use This'}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Agent Cards */}
         <div style={{
           display: 'grid',
@@ -315,6 +498,9 @@ function MultiAgentQuestionPopup({
             const question = getQuestion(agentId)
             const isSelected = selectedAgent === agentId
             const isEditing = editingAgent === agentId
+            const isRecommended = hasPick && currentRecommendation.recommendedAgentId === agentId
+            const candidateEval = getCandidateEval(agentId)
+            const verdictStyle = candidateEval ? VERDICT_STYLE[candidateEval.verdict] : null
             const hasError = !!result.error && result.questions.length === 0
             const hasNoQuestionAtIndex = !question && !hasError
 
@@ -325,16 +511,37 @@ function MultiAgentQuestionPopup({
                   borderRadius: '14px',
                   border: isSelected
                     ? `2px solid ${result.color || '#3b82f6'}`
-                    : '2px solid var(--border-color, #333)',
+                    : isRecommended
+                      ? `2px solid #f59e0b80`
+                      : '2px solid var(--border-color, #333)',
                   background: isSelected
                     ? `${result.color || '#3b82f6'}08`
-                    : 'var(--bg-secondary, #2a2a3e)',
+                    : isRecommended
+                      ? '#f59e0b06'
+                      : 'var(--bg-secondary, #2a2a3e)',
                   padding: '18px',
                   transition: 'all 0.2s ease',
                   position: 'relative',
                   opacity: (isCurrentLaunched && !isSelected) ? 0.4 : 1
                 }}
               >
+                {/* Star badge on recommended card */}
+                {isRecommended && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '-10px',
+                    right: '12px',
+                    background: '#f59e0b',
+                    color: 'white',
+                    fontSize: '10px',
+                    fontWeight: '700',
+                    padding: '2px 8px',
+                    borderRadius: '20px',
+                    letterSpacing: '0.04em',
+                    boxShadow: '0 2px 6px #f59e0b40'
+                  }}>⭐ RECOMMENDED</div>
+                )}
+
                 {/* Agent Header */}
                 <div style={{
                   display: 'flex',
@@ -360,7 +567,37 @@ function MultiAgentQuestionPopup({
                       </div>
                     </div>
                   </div>
+                  {/* Evaluator verdict for this candidate */}
+                  {verdictStyle && question && !hasError && (
+                    <span
+                      title={candidateEval.note || ''}
+                      style={{
+                        padding: '2px 8px',
+                        borderRadius: '20px',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        whiteSpace: 'nowrap',
+                        color: verdictStyle.color,
+                        background: `${verdictStyle.color}18`,
+                        border: `1px solid ${verdictStyle.color}50`
+                      }}
+                    >
+                      {verdictStyle.label}{typeof candidateEval.score === 'number' ? ` · ${candidateEval.score}` : ''}
+                    </span>
+                  )}
                 </div>
+
+                {/* Evaluator flags (why a candidate needs review / was not recommended) */}
+                {candidateEval?.flags?.length > 0 && question && !hasError && (
+                  <div style={{
+                    marginBottom: '10px',
+                    fontSize: '11px',
+                    color: 'var(--text-secondary, #999)',
+                    lineHeight: '1.4'
+                  }}>
+                    ⚠️ {candidateEval.flags.map(f => FLAG_LABELS[f] || f).join(' · ')}
+                  </div>
+                )}
 
                 {/* Error State */}
                 {hasError && (

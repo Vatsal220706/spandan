@@ -98,7 +98,12 @@ function RoomDetailPage() {
   // Multi-Agent state
   const [showMultiAgentPopup, setShowMultiAgentPopup] = useState(false)
   const [multiAgentResults, setMultiAgentResults] = useState(null)
+  const [evaluatorResults, setEvaluatorResults] = useState([])
+  const [multiAgentTranscriptInfo, setMultiAgentTranscriptInfo] = useState(null)
   const [isMultiAgentGenerating, setIsMultiAgentGenerating] = useState(false)
+  // Last multi-agent request ({ text, typeMixOverride }) so Regenerate re-runs the SAME source and
+  // type rules — a Paste regenerate must keep its MCQ/TF override, not fall back to the room mix.
+  const lastMultiAgentRequestRef = useRef(null)
   // Segment pause/resume state
   const [isSegmentPaused, setIsSegmentPaused] = useState(false)
   const [segmentTimerValue, setSegmentTimerValue] = useState(0) // frozen value when paused
@@ -1070,10 +1075,13 @@ function RoomDetailPage() {
   const handleMultiAgentGenerate = async (text, source = 'segment', questionTypeMixOverride = null) => {
     setIsMultiAgentGenerating(true)
     setShowGeneratingPopup(true)
+    if (source !== 'regenerate') {
+      lastMultiAgentRequestRef.current = { text, typeMixOverride: questionTypeMixOverride }
+    }
 
     try {
       const result = await requestMultiAgentGeneration(text, {
-        numQuestions: 1, // each agent generates 1 question to compare for this segment
+        numQuestions: roomSettings.questionsPerSegment || 2, // use the room-configured questions per segment
         difficulty: roomSettings.difficulty,
         questionTypeMix: questionTypeMixOverride || roomSettings.questionTypeMix || { MCQ: 50, TF: 30, MSQ: 20 },
         agents: roomSettings.activeAgents || ['agent_1', 'agent_2', 'agent_3']
@@ -1084,6 +1092,8 @@ function RoomDetailPage() {
 
       if (result.success && result.agentResults) {
         setMultiAgentResults(result.agentResults)
+        setEvaluatorResults(result.evaluatorResults || [])
+        setMultiAgentTranscriptInfo(result.transcriptInfo || null)
         setShowMultiAgentPopup(true)
         setIsPopupOpen(true)
       } else {
@@ -2257,16 +2267,23 @@ function RoomDetailPage() {
       {showMultiAgentPopup && multiAgentResults && (
         <MultiAgentQuestionPopup
           agentResults={multiAgentResults}
+          evaluatorResults={evaluatorResults}
+          transcriptInfo={multiAgentTranscriptInfo}
           onApprove={handleMultiAgentApprove}
           onClose={() => {
             setShowMultiAgentPopup(false)
             setMultiAgentResults(null)
+            setEvaluatorResults([])
+            setMultiAgentTranscriptInfo(null)
             setIsPopupOpen(false)
             setIsPendingReview(false)
             setGenerateQEnabled(true)
           }}
           onRegenerate={async () => {
-            const textToUse = pastedText || segmentTranscript.trim() || transcript.trim()
+            // Replay the request that produced these results (same text + same type override),
+            // so a Paste regenerate stays on the pasted text and its MCQ/TF mode.
+            const last = lastMultiAgentRequestRef.current
+            const textToUse = last?.text || pastedText || segmentTranscript.trim() || transcript.trim()
             if (!textToUse || textToUse.length < 20) {
               alert('Transcript is too short to regenerate questions.')
               return
@@ -2274,7 +2291,7 @@ function RoomDetailPage() {
             try {
               // Don't null out results — the popup stays visible with isRegenerating=true
               // handleMultiAgentGenerate will replace results atomically when done
-              await handleMultiAgentGenerate(textToUse, 'regenerate')
+              await handleMultiAgentGenerate(textToUse, 'regenerate', last?.typeMixOverride || null)
             } catch (error) {
               alert('Regeneration failed: ' + error.message)
             }

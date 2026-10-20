@@ -27,11 +27,14 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': {
           target: 'http://localhost:3001',
-          changeOrigin: true
+          changeOrigin: true,
+          timeout: 300000,       // 5 min — multi-agent generation can take 30–60s
+          proxyTimeout: 300000
         },
         '/socket.io': {
           target: 'http://localhost:3001',
-          ws: true
+          ws: true,
+          changeOrigin: true
         }
       }
     }
