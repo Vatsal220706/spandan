@@ -119,7 +119,8 @@ function RoomDetailPage() {
     timeToAnswer: 30,
     points: 100,
     multiAgentEnabled: true,
-    activeAgents: ['agent_1', 'agent_2', 'agent_3']
+    activeAgents: ['agent_1', 'agent_2', 'agent_3'],
+    launchMode: 'manual' // 'auto' = launch Agent 4's recommended question automatically
   })
   const [totalParticipants, setTotalParticipants] = useState(0)
   const [answerCounts, setAnswerCounts] = useState({}) // questionId -> count
@@ -2269,6 +2270,7 @@ function RoomDetailPage() {
           agentResults={multiAgentResults}
           evaluatorResults={evaluatorResults}
           transcriptInfo={multiAgentTranscriptInfo}
+          launchMode={roomSettings.launchMode || 'manual'}
           onApprove={handleMultiAgentApprove}
           onClose={() => {
             setShowMultiAgentPopup(false)

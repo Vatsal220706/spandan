@@ -62,7 +62,11 @@ const roomSchema = new mongoose.Schema({
     // The teacher sees all results and picks which question to launch.
     multiAgentEnabled: { type: Boolean, default: false },
     // Which agents to run when multi-agent is enabled. Subset of ['agent_1','agent_2','agent_3'].
-    activeAgents: { type: [String], default: ['agent_1', 'agent_2', 'agent_3'] }
+    activeAgents: { type: [String], default: ['agent_1', 'agent_2', 'agent_3'] },
+    // Who launches a multi-agent question: 'manual' = the teacher selects one of the agents'
+    // candidates; 'auto' = Agent 4's recommended question is launched automatically (the teacher
+    // can still cancel, and slots Agent 4 isn't confident about fall back to manual).
+    launchMode: { type: String, enum: ['manual', 'auto'], default: 'manual' }
   }
 }, {
   timestamps: true

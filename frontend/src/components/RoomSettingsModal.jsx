@@ -371,7 +371,46 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
                 )
               })}
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                All agents use Gemini API • Runs sequentially • At least 1 required
+                Agents run in parallel • At least 1 required
+              </div>
+
+              {/* Who launches the question: the teacher, or Agent 4's recommendation automatically */}
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '10px' }}>
+                Question launch:
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {[
+                  { id: 'manual', label: '👩‍🏫 Teacher selects' },
+                  { id: 'auto', label: '⭐ Auto-launch Agent 4’s pick' }
+                ].map(opt => {
+                  const isActive = (localSettings.launchMode || 'manual') === opt.id
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={() => setLocalSettings(prev => ({ ...prev, launchMode: opt.id }))}
+                      aria-pressed={isActive}
+                      style={{
+                        flex: 1,
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        border: isActive ? '2px solid #f59e0b' : '2px solid transparent',
+                        background: isActive ? '#f59e0b15' : 'var(--bg-primary)',
+                        color: 'var(--text-primary)',
+                        fontSize: '13px',
+                        fontWeight: isActive ? '600' : '400',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                {(localSettings.launchMode || 'manual') === 'auto'
+                  ? 'Agent 4’s recommended question launches after a short countdown you can cancel; the next one follows when its answer time ends. Questions Agent 4 isn’t sure about wait for you.'
+                  : 'You compare the agents’ questions and launch the one you choose.'}
               </div>
             </div>
           )}

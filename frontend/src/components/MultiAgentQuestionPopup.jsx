@@ -45,10 +45,14 @@ const VERDICT_STYLE = {
   rejected: { label: 'Not recommended', color: '#ef4444' }
 }
 
+// Auto-launch: seconds the teacher has to cancel before Agent 4's pick is launched.
+export const AUTO_LAUNCH_DELAY_S = 5
+
 function MultiAgentQuestionPopup({
   agentResults = {},
   evaluatorResults = [],
   transcriptInfo = null,
+  launchMode = 'manual', // 'auto' = launch Agent 4's recommended question automatically
   onApprove,
   onClose,
   onRegenerate,
@@ -63,11 +67,18 @@ function MultiAgentQuestionPopup({
   const [launchedIndices, setLaunchedIndices] = useState(new Set()) // which question indices have been launched
   const [launchCountdown, setLaunchCountdown] = useState(null)
   const intervalRef = useRef(null)
+  // Auto-launch state: on/off for this popup (the teacher can switch it off here), the seconds
+  // left before an auto-launch, and the slots the teacher took over by selecting or editing.
+  const [autoMode, setAutoMode] = useState(launchMode === 'auto')
+  const [autoCountdown, setAutoCountdown] = useState(null)
+  const [manualSlots, setManualSlots] = useState(new Set())
+  const autoTimerRef = useRef(null)
 
-  // Clean up countdown interval on unmount
+  // Clean up countdown intervals on unmount
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
+      if (autoTimerRef.current) clearInterval(autoTimerRef.current)
     }
   }, [])
 
@@ -126,24 +137,32 @@ function MultiAgentQuestionPopup({
     setEditedQuestions(prev => ({ ...prev, [editKey]: updatedQuestion }))
   }
 
+  // The teacher acting on this slot (select / edit / cancel) stops auto-launch for it.
+  const takeOverSlot = () => {
+    if (!autoMode) return
+    setManualSlots(prev => new Set([...prev, currentIndex]))
+  }
+
   // Handle select
   const handleSelect = (agentId) => {
     if (isCurrentLaunched) return
+    takeOverSlot()
     setSelectedAgent(agentId === selectedAgent ? null : agentId)
   }
 
-  // Handle launch
-  const handleLaunch = () => {
-    if (!selectedAgent || isCurrentLaunched) return
-    const question = getQuestion(selectedAgent)
+  // Handle launch (agentIdArg is passed by auto-launch; manual launch uses the selected card)
+  const handleLaunch = (agentIdArg) => {
+    const agentId = typeof agentIdArg === 'string' ? agentIdArg : selectedAgent
+    if (!agentId || isCurrentLaunched) return
+    const question = getQuestion(agentId)
     if (!question) return
 
-    const agentInfo = agentResults[selectedAgent]
+    const agentInfo = agentResults[agentId]
     const launchQuestion = {
       ...question,
       timeToAnswer: roomSettings.timeToAnswer || 30,
       points: roomSettings.points || 100,
-      agent: selectedAgent,
+      agent: agentId,
       efficiencyLevel: agentInfo?.efficiencyLevel
     }
 
@@ -164,8 +183,64 @@ function MultiAgentQuestionPopup({
       })
     }, 1000)
 
-    onApprove(launchQuestion, { agentId: selectedAgent, ...agentInfo })
+    onApprove(launchQuestion, { agentId, ...agentInfo })
   }
+
+  // --- Auto-launch (launchMode 'auto') ---
+  // Only a confident pick ('recommended') is launched automatically. 'needs_review',
+  // 'no_good_candidate', 'unavailable', or a slot the teacher took over waits for the teacher.
+  const recommendedId = hasPick ? currentRecommendation.recommendedAgentId : null
+  const canAutoLaunch = autoMode && recStatus === 'recommended' && !!recommendedId &&
+    !!getQuestion(recommendedId) && !isCurrentLaunched && !manualSlots.has(currentIndex) && !isRegenerating
+
+  // Arm the countdown: select Agent 4's pick and count down AUTO_LAUNCH_DELAY_S seconds.
+  useEffect(() => {
+    if (autoTimerRef.current) {
+      clearInterval(autoTimerRef.current)
+      autoTimerRef.current = null
+    }
+    if (!canAutoLaunch) {
+      setAutoCountdown(null)
+      return
+    }
+    setSelectedAgent(recommendedId)
+    setAutoCountdown(AUTO_LAUNCH_DELAY_S)
+    autoTimerRef.current = setInterval(() => {
+      setAutoCountdown(prev => (prev === null ? null : Math.max(0, prev - 1)))
+    }, 1000)
+    return () => {
+      if (autoTimerRef.current) {
+        clearInterval(autoTimerRef.current)
+        autoTimerRef.current = null
+      }
+    }
+  }, [canAutoLaunch, currentIndex, recommendedId])
+
+  // Countdown reached zero: launch the recommended question.
+  useEffect(() => {
+    if (autoCountdown === 0 && canAutoLaunch) {
+      setAutoCountdown(null)
+      handleLaunch(recommendedId)
+    }
+  }, [autoCountdown]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When an auto-launched question's answer time ends, move to the next slot (which then
+  // auto-launches its own recommendation, or waits for the teacher).
+  useEffect(() => {
+    if (autoMode && isCurrentLaunched && launchCountdown === 0 && !isLastQuestion) {
+      setCurrentIndex(prev => prev + 1)
+    }
+  }, [autoMode, isCurrentLaunched, launchCountdown, isLastQuestion])
+
+  // Why auto-launch is waiting on this slot (shown to the teacher).
+  const autoPauseReason = !autoMode || isCurrentLaunched || canAutoLaunch ? null
+    : manualSlots.has(currentIndex) ? 'you took over this question'
+      : !currentRecommendation ? 'Agent 4 has no recommendation for this question'
+        : recStatus === 'needs_review' ? 'Agent 4 wants you to review its pick first'
+          : recStatus === 'unavailable' ? 'Agent 4 could not evaluate this question'
+            : recStatus === 'no_good_candidate' ? 'no candidate met the quality bar'
+              : isRegenerating ? 'questions are being regenerated'
+                : 'no recommended question is available'
 
   // Navigate to next question
   const handleNext = () => {
@@ -266,6 +341,74 @@ function MultiAgentQuestionPopup({
             </button>
           </div>
         </div>
+
+        {/* Auto-launch status (room setting: launch Agent 4's pick automatically) */}
+        {launchMode === 'auto' && (
+          <div
+            data-testid="auto-launch-bar"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
+              marginBottom: '14px',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              background: autoMode ? '#f59e0b10' : 'var(--bg-secondary, #2a2a3e)',
+              border: autoMode ? '1px solid #f59e0b40' : '1px solid var(--border-color, #333)',
+              fontSize: '13px',
+              color: 'var(--text-primary, #fff)'
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              {!autoMode && 'Auto-launch is off for this session — select and launch questions yourself.'}
+              {autoMode && autoCountdown !== null && (
+                <>⭐ Launching <strong>{agentResults[recommendedId]?.label || 'Agent 4’s pick'}</strong>’s question in <strong>{autoCountdown}s</strong></>
+              )}
+              {autoMode && autoCountdown === null && autoPauseReason && (
+                <>⏸ Auto-launch is waiting — {autoPauseReason}. Select and launch a question yourself.</>
+              )}
+              {autoMode && autoCountdown === null && !autoPauseReason && isCurrentLaunched && (
+                isLastQuestion
+                  ? '✓ All recommended questions launched.'
+                  : <>Next question launches automatically when this one ends{launchCountdown ? ` (${launchCountdown}s)` : ''}.</>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+              {autoMode && autoCountdown !== null && (
+                <button
+                  onClick={takeOverSlot}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid #f59e0b',
+                    background: 'transparent',
+                    color: '#f59e0b',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                onClick={() => setAutoMode(prev => !prev)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: 'var(--bg-primary, #1a1a2e)',
+                  color: 'var(--text-secondary, #999)',
+                  fontSize: '12px',
+                  cursor: 'pointer'
+                }}
+              >
+                {autoMode ? 'Switch to manual' : 'Turn auto-launch back on'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Question Navigation Bar (only when multiple questions) */}
         {totalQuestions > 1 && (
@@ -727,7 +870,7 @@ function MultiAgentQuestionPopup({
                       {!isCurrentLaunched && (
                         <>
                           <button
-                            onClick={() => setEditingAgent(isEditing ? null : agentId)}
+                            onClick={() => { takeOverSlot(); setEditingAgent(isEditing ? null : agentId) }}
                             style={{
                               flex: 1,
                               padding: '8px',
