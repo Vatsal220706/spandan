@@ -5,23 +5,27 @@ import useSocketStore from '../stores/socketStore'
 import useRoomStore from '../stores/roomStore'
 import useThemeStore from '../stores/themeStore'
 import Sidebar from '../components/Sidebar'
-import ThemeToggle from '../components/ThemeToggle'
-import ProfileDropdown from '../components/ProfileDropdown'
+import { PageHeader } from '../components/AppUI'
 import QuestionApprovalPopup from '../components/QuestionApprovalPopup'
 import TextQuestionApprovalPopup from '../components/TextQuestionApprovalPopup'
 import CreateQuestionOverlay from '../components/CreateQuestionOverlay'
 import TextToQuestionsPopup from '../components/TextToQuestionsPopup'
 import RoomSettingsModal from '../components/RoomSettingsModal'
-import MultiAgentQuestionPopup from '../components/MultiAgentQuestionPopup'
+import SoundToggle from '../components/SoundToggle'
 import Leaderboard from '../components/Leaderboard'
 import ErrorBoundary from '../components/ErrorBoundary'
 import YouTubeVideo, { extractYouTubeId } from '../components/YouTubeVideo'
 import useIsMobile from '../hooks/useIsMobile'
-import { saveTranscript } from '../services/transcriptService'
+import { saveTranscript, getTranscripts } from '../services/transcriptService'
+import { lastSegmentInData, segmentToStart } from '../lib/segments'
+import { installUnlockOnInteraction } from '../lib/sounds'
+import useGeneratedBatchCues from '../hooks/useGeneratedBatchCues'
 import { transcribeAudio, getTranscriptionStatus, convertWebMToWav } from '../services/serverTranscriptionService'
 import { requestQuestionGeneration, fetchAllRoomQuestions } from '../services/questionService'
 import { requestMultiAgentGeneration } from '../services/multiAgentService'
 import { API_URL } from '../config.js'
+import { ArrowLeft, Check, Clapperboard, Copy, FileText, Hourglass, LoaderCircle, Mic as MicIcon, PenLine, RefreshCw, Settings, Timer, Trophy, Users, X } from 'lucide-react'
+import { Ico } from '../components/icons'
 
 function RoomDetailPage() {
   const { roomId } = useParams()
@@ -33,7 +37,7 @@ function RoomDetailPage() {
   const isMobile = useIsMobile()
   // Room code + participant count use a deep blue on light, but that reads too dark on the dark card;
   // switch to white in dark mode for clean, high contrast.
-  const codeColor = isDark ? '#ffffff' : '#1e40af'
+  const codeColor = isDark ? '#ffffff' : 'var(--accent)'
 
   const [room, setRoom] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -72,6 +76,10 @@ function RoomDetailPage() {
 
   // Segment tracking
   const [currentSegment, setCurrentSegment] = useState(0)
+  // Highest segment this room already has data for (seeded from the server on load, raised on every
+  // segment save), so a reload continues the numbering instead of starting again at 1.
+  const lastSegmentRef = useRef(0)
+  const markSegmentUsed = (n) => { if (n > lastSegmentRef.current) lastSegmentRef.current = n }
   const [segmentTranscript, setSegmentTranscript] = useState('')
   const [segmentTimeLeft, setSegmentTimeLeft] = useState(0)
   const segmentTimerRef = useRef(null)
@@ -369,7 +377,6 @@ function RoomDetailPage() {
       // Resume for next segment
       setIsPendingReview(false)
       setGenerateQEnabled(true)
-      setCurrentSegment(prev => prev + 1)
       setTranscript('')
       setSegmentTranscript('')
       segmentTranscriptRef.current = ''
@@ -425,6 +432,7 @@ function RoomDetailPage() {
       // Questions are in hand and the review popup is up — NOW persist the transcript, fire-and-forget
       // so a slow/failed/hung save can never block the pipeline or lose the generated questions.
       // source defaults to 'audio' (real segment).
+      markSegmentUsed(currentSegment)
       saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
         .catch((err) => console.error('[SEGMENT] Failed to save transcript (questions already generated):', err))
     }
@@ -569,6 +577,11 @@ function RoomDetailPage() {
       // not just the first 50.
       const questions = await fetchAllRoomQuestions(rid)
       setGeneratedQuestions(questions)
+      markSegmentUsed(lastSegmentInData(questions))
+      // Transcripts also count: a segment whose questions were all rejected leaves only its transcript.
+      getTranscripts(rid)
+        .then((data) => markSegmentUsed(lastSegmentInData([], data?.transcripts)))
+        .catch((err) => console.error('Failed to load transcripts for segment numbering:', err))
       // Also load answer counts
       const countsRes = await fetch(`${API_URL}/responses/counts/${rid}`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -740,7 +753,7 @@ function RoomDetailPage() {
     if (isVideoMode) {
       if (!streamRef.current) return
       setTranscript(''); finalTranscriptRef.current = ''; accumulatedTranscriptRef.current = ''
-      setCurrentSegment(prev => resetSegment ? 1 : prev + 1)
+      setCurrentSegment(prev => segmentToStart({ prev, lastUsed: lastSegmentRef.current, fresh: resetSegment }))
       setSegmentTranscript(''); segmentTranscriptRef.current = ''
       transcriptionQueueRef.current = []
       nextSequenceRef.current = 0
@@ -781,7 +794,7 @@ function RoomDetailPage() {
       setTranscript('')
       finalTranscriptRef.current = ''
       accumulatedTranscriptRef.current = ''
-      setCurrentSegment(prev => resetSegment ? 1 : prev + 1)
+      setCurrentSegment(prev => segmentToStart({ prev, lastUsed: lastSegmentRef.current, fresh: resetSegment }))
       setSegmentTranscript('')
       segmentTranscriptRef.current = ''
 
@@ -924,6 +937,14 @@ function RoomDetailPage() {
     createPopupWasOpenRef.current = showCreateQuestion
   }, [showCreateQuestion])
 
+  // Attention cues when a GENERATED batch arrives — the auto-segment approval popup or the Paste &
+  // Generate review popup opening (Create Q is the teacher's own typing: no cue). See the hook for the
+  // chime / 'questions:ready' emit (once per batch) / tab-title flash.
+  const generatedPopupOpen = (showQuestionPopup && pendingQuestions.length > 0)
+    || (showTextQuestionPopup && pendingTextQuestions.length > 0)
+  useEffect(() => { installUnlockOnInteraction() }, [])
+  useGeneratedBatchCues(generatedPopupOpen, socket, room?.code)
+
   const resumeTeacherVideo = () => {
     // Tell students the popup window is over so they resume + jump to the live edge (fire even if the
     // teacher's own player ref isn't ready).
@@ -991,7 +1012,7 @@ function RoomDetailPage() {
       setSegmentTranscript(''); segmentTranscriptRef.current = ''
       transcriptionQueueRef.current = []; nextSequenceRef.current = 0
       pendingSequenceRef.current = 0; isProcessingQueueRef.current = false
-      setCurrentSegment(1)
+      setCurrentSegment(segmentToStart({ lastUsed: lastSegmentRef.current, fresh: true }))
       setVideoSessionActive(true)
       setModelStatus('Ready - press play to begin')
 
@@ -1160,10 +1181,21 @@ function RoomDetailPage() {
     setGenerateQEnabled(false)
 
     try {
-      // Always run multi-agent question comparison with the settings question type distribution
-      await handleMultiAgentGenerate(textToUse, 'manual')
-      saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
-        .catch((err) => console.error('[MANUAL] Failed to save transcript:', err))
+      // Manual "Generate Q" is the fail-safe RETRY of the CURRENT segment's automatic generation, so
+      // it targets `currentSegment` (matching handleSegmentComplete) and does NOT advance the counter
+      // — it re-does segment N, it does not move to N+1 (the next segment is bumped later by
+      // startRecording when the teacher resumes).
+      const questions = await generateQuestionsFromText(textToUse, currentSegment)
+      if (questions && questions.length > 0) {
+        setPendingQuestions(questions)
+        setShowQuestionPopup(true)
+        setIsPopupOpen(true)
+        // Persist the transcript only once questions exist — fire-and-forget so it never blocks.
+        // Live transcript → source 'audio'; segmentIndex matches the questions (currentSegment).
+        markSegmentUsed(currentSegment)
+        saveTranscript(room._id, currentSegment, textToUse, roomSettings.segmentTime * 60)
+          .catch((err) => console.error('[MANUAL] Failed to save transcript (questions already generated):', err))
+      }
     } catch (error) {
       console.error('Manual multi-agent generation failed:', error)
       alert('Failed to generate questions: ' + error.message)
@@ -1325,7 +1357,7 @@ function RoomDetailPage() {
               width: '48px',
               height: '48px',
               border: '4px solid var(--border-color)',
-              borderTopColor: '#3b82f6',
+              borderTopColor: 'var(--accent)',
               borderRadius: '50%',
               animation: 'spin 1s linear infinite',
               margin: '0 auto 16px'
@@ -1347,7 +1379,7 @@ function RoomDetailPage() {
             <button onClick={() => navigate('/teacher')} style={{
               marginTop: '16px',
               padding: '12px 24px',
-              background: '#3b82f6',
+              background: 'var(--accent-solid)',
               color: 'white',
               border: 'none',
               borderRadius: '10px',
@@ -1368,18 +1400,7 @@ function RoomDetailPage() {
       <Sidebar user={user} />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', marginLeft: 'var(--sidebar-width, 240px)', minWidth: 0, maxWidth: 'calc(100vw - var(--sidebar-width, 240px))', overflowX: 'hidden' }}>
-        {/* Header */}
-        <header style={{ background: 'var(--header-bg)', color: 'white', padding: isMobile ? '16px 16px' : '16px 32px', paddingLeft: isMobile ? '64px' : '32px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h1 style={{ margin: 0, fontSize: '20px', fontWeight: '700', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{room.name}</h1>
-            </div>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <ThemeToggle />
-              <ProfileDropdown />
-            </div>
-          </div>
-        </header>
+        <PageHeader isMobile={isMobile} icon={room.settings?.mode === 'video' ? Clapperboard : MicIcon} eyebrow={room.endedAt ? 'Teacher console · ended' : 'Teacher console · live'} title={room.name} />
 
         {/* Content */}
         <div style={{ flex: 1, padding: isMobile ? '16px' : '24px 32px', width: '100%', boxSizing: 'border-box', overflowX: 'hidden' }}>
@@ -1411,12 +1432,13 @@ function RoomDetailPage() {
               border: 'none',
               borderRadius: '8px',
               cursor: 'pointer',
-              fontSize: '18px'
+              fontSize: '18px',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
             }}>
-              ←
+              <ArrowLeft size={18} aria-hidden="true" />
             </button>
 
-            <div style={{
+            <div data-tour="room-code" style={{
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
@@ -1430,14 +1452,14 @@ function RoomDetailPage() {
               </span>
               <button onClick={copyRoomCode} disabled={isEnded} style={{
                 padding: '4px 12px',
-                background: isEnded ? '#9ca3af' : (copied ? '#10b981' : '#3b82f6'),
+                background: isEnded ? '#9ca3af' : (copied ? '#10b981' : 'var(--accent-solid)'),
                 color: 'white',
                 border: 'none',
                 borderRadius: '4px',
                 fontSize: '12px',
                 cursor: isEnded ? 'not-allowed' : 'pointer'
               }}>
-                {copied ? '✓ Copied' : '📋 Copy'}
+                {copied ? <><Ico as={Check} /> Copied</> : <><Ico as={Copy} /> Copy</>}
               </button>
             </div>
 
@@ -1456,7 +1478,7 @@ function RoomDetailPage() {
                 {totalParticipants}
               </span>
               <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: '600', whiteSpace: 'nowrap' }}>
-                👥 Participants
+                <Ico as={Users} /> Participants
               </span>
             </div>
 
@@ -1493,7 +1515,7 @@ function RoomDetailPage() {
                 border: `2px solid ${questionTimeLeft <= 5 ? '#ef4444' : '#10b981'}`
               }}>
                 <span style={{ fontSize: '14px', color: questionTimeLeft <= 5 ? '#ef4444' : '#10b981', fontWeight: '600' }}>
-                  ⏱️ Answer
+                  <Ico as={Timer} /> Answer
                 </span>
                 <span style={{
                   fontSize: '20px',
@@ -1521,7 +1543,7 @@ function RoomDetailPage() {
                 border: '2px solid #ef4444'
               }}>
                 <span style={{ fontSize: '14px', color: '#ef4444', fontWeight: '600' }}>
-                  ⏱️ Time's Up!
+                  <Ico as={Timer} /> Time's Up!
                 </span>
               </div>
             )}
@@ -1529,10 +1551,11 @@ function RoomDetailPage() {
             {/* Paste & Generate Button */}
             {!isEnded && (
               <button
+                data-tour="paste-generate"
                 onClick={() => { setPastedText(''); setShowTextToQuestions(true) }}
                 style={{
                   padding: '8px 16px',
-                  background: '#10b981',
+                  background: 'var(--success-solid)',
                   color: 'white',
                   border: 'none',
                   borderRadius: '8px',
@@ -1544,7 +1567,7 @@ function RoomDetailPage() {
                   gap: '6px'
                 }}
               >
-                📝 Paste & Generate
+                <Ico as={FileText} /> Paste & Generate
               </button>
             )}
 
@@ -1554,7 +1577,7 @@ function RoomDetailPage() {
                 onClick={() => setShowCreateQuestion(true)}
                 style={{
                   padding: '8px 16px',
-                  background: '#3b82f6',
+                  background: 'var(--accent-solid)',
                   color: 'white',
                   border: 'none',
                   borderRadius: '8px',
@@ -1566,13 +1589,17 @@ function RoomDetailPage() {
                   gap: '6px'
                 }}
               >
-                ✍️ Create Q
+                <Ico as={PenLine} /> Create Q
               </button>
             )}
+
+            {/* Sound on/off for the attention chimes (per device) */}
+            <SoundToggle />
 
             {/* Settings Dropdown */}
             <div style={{ position: 'relative' }} ref={settingsRef}>
               <button
+                data-tour="settings"
                 onClick={() => setShowSettings(true)}
                 style={{
                   padding: '8px 16px',
@@ -1588,7 +1615,7 @@ function RoomDetailPage() {
                   gap: '6px'
                 }}
               >
-                ⚙️ Settings
+                <Ico as={Settings} /> Settings
               </button>
 
               <RoomSettingsModal
@@ -1617,7 +1644,7 @@ function RoomDetailPage() {
 
             {/* End Room Button */}
             {!isEnded && (
-              <button onClick={handleEndRoom} style={{
+              <button data-tour="end-room" onClick={handleEndRoom} style={{
                 padding: '8px 16px',
                 background: '#ef4444',
                 color: 'white',
@@ -1746,6 +1773,7 @@ function RoomDetailPage() {
                   )}
                   {videoId && !videoSessionActive && (
                     <button
+                      data-tour="start-capture"
                       onClick={beginVideoSession}
                       disabled={isEnded}
                       style={{
@@ -1777,7 +1805,7 @@ function RoomDetailPage() {
               {!isVideoMode && (
               <>
               {/* Mic Button */}
-              <button
+              <button data-tour="start-capture"
                 onClick={toggleRecording}
                 disabled={isEnded}
                 style={{
@@ -1881,7 +1909,7 @@ function RoomDetailPage() {
             </div>
 
             {/* Transcription Card */}
-            <div style={{
+            <div data-tour="transcript" style={{
               flex: isMobile ? '1 1 100%' : (isVideoMode ? '1 1 calc(40% - 10px)' : '1 1 calc(70% - 10px)'),
               minWidth: isMobile ? 0 : '300px',
               maxWidth: '100%',
@@ -1906,7 +1934,7 @@ function RoomDetailPage() {
                 borderBottom: '1px solid var(--border-color)'
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                  <span style={{ fontSize: '18px' }}>🎙️</span>
+                  <span style={{ fontSize: '18px', display: 'inline-flex', color: 'var(--accent)' }}><MicIcon size={18} aria-hidden="true" /></span>
                   <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)' }}>
                     Current Segment Transcription
                   </span>
@@ -1927,7 +1955,7 @@ function RoomDetailPage() {
                       color: 'var(--text-secondary)',
                       cursor: 'pointer'
                     }}>
-                      ✕ Clear
+                      <Ico as={X} /> Clear
                     </button>
                   )}
                   <button
@@ -1935,7 +1963,7 @@ function RoomDetailPage() {
                     disabled={isGeneratingQuestions || isMultiAgentGenerating || (!transcript && !segmentTranscript) || !generateQEnabled}
                     style={{
                       padding: '4px 12px',
-                      background: '#3b82f6',
+                      background: 'var(--accent-solid)',
                       color: 'white',
                       border: 'none',
                       borderRadius: '6px',
@@ -1948,7 +1976,7 @@ function RoomDetailPage() {
                       gap: '4px'
                     }}
                   >
-                    {isGeneratingQuestions || isMultiAgentGenerating ? '⏳ Generating...' : '⚡ Generate Q'}
+                    {isGeneratingQuestions ? <><Ico as={Hourglass} /> Generating...</> : <><Ico as={RefreshCw} /> Generate Q</>}
                   </button>
                 </div>
               </div>
@@ -1979,15 +2007,15 @@ function RoomDetailPage() {
             {/* Session Questions - flexible width */}
             <div style={{ flex: isMobile ? '1 1 100%' : '1 1 calc(70% - 10px)', minWidth: isMobile ? 0 : '300px', maxWidth: '100%', background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-md)', padding: '20px', boxSizing: 'border-box', overflow: 'hidden' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-              <span style={{ fontSize: '20px' }}>📝</span>
+              <span style={{ fontSize: '20px', display: 'inline-flex', color: 'var(--accent)' }}><FileText size={20} aria-hidden="true" /></span>
               <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)' }}>
                 Session Questions
               </span>
               {generatedQuestions.length > 0 && (
                 <span style={{
                   padding: '2px 10px',
-                  background: '#d1fae5',
-                  color: '#059669',
+                  background: 'var(--tint-success-bg)',
+                  color: 'var(--tint-success-fg)',
                   borderRadius: '12px',
                   fontSize: '12px',
                   fontWeight: '600'
@@ -2014,7 +2042,7 @@ function RoomDetailPage() {
                       width: '28px',
                       height: '28px',
                       borderRadius: '50%',
-                      background: '#3b82f6',
+                      background: 'var(--accent-solid)',
                       color: 'white',
                       display: 'flex',
                       alignItems: 'center',
@@ -2032,8 +2060,8 @@ function RoomDetailPage() {
                           borderRadius: '4px',
                           fontSize: '10px',
                           fontWeight: '600',
-                          background: q.type === 'MCQ' ? '#3b82f620' : q.type === 'TF' ? '#10b9820' : '#8b5cf620',
-                          color: q.type === 'MCQ' ? '#3b82f6' : q.type === 'TF' ? '#10b982' : '#8b5cf6'
+                          background: q.type === 'MCQ' ? 'color-mix(in srgb, var(--accent) 13%, transparent)' : q.type === 'TF' ? '#10b98120' : '#8b5cf620',
+                          color: q.type === 'MCQ' ? 'var(--accent)' : q.type === 'TF' ? '#10b982' : '#8b5cf6'
                         }}>
                           {q.type}
                         </span>
@@ -2042,8 +2070,8 @@ function RoomDetailPage() {
                           borderRadius: '4px',
                           fontSize: '10px',
                           fontWeight: '600',
-                          background: '#fef3c7',
-                          color: '#92400e'
+                          background: 'var(--tint-warn-bg)',
+                          color: 'var(--tint-warn-fg)'
                         }}>
                           {q.points || 100} pts
                         </span>
@@ -2057,14 +2085,14 @@ function RoomDetailPage() {
                           return (
                             <div key={optIdx} style={{
                               padding: '8px 12px',
-                              background: opt.isCorrect ? '#d1fae5' : 'var(--bg-secondary)',
-                              border: `2px solid ${opt.isCorrect ? '#059669' : 'var(--border-color)'}`,
+                              background: opt.isCorrect ? 'var(--tint-success-bg)' : 'var(--bg-secondary)',
+                              border: `2px solid ${opt.isCorrect ? 'var(--tint-success-border)' : 'var(--border-color)'}`,
                               borderRadius: '6px',
                               display: 'flex',
                               alignItems: 'center',
                               gap: '8px',
                               fontSize: '13px',
-                              color: opt.isCorrect ? '#059669' : 'var(--text-primary)'
+                              color: opt.isCorrect ? 'var(--tint-success-fg)' : 'var(--text-primary)'
                             }}>
                               <span style={{
                                 width: '22px',
@@ -2085,7 +2113,7 @@ function RoomDetailPage() {
                                 {opt.text}
                               </span>
                               {opt.isCorrect && (
-                                <span style={{ marginLeft: 'auto', fontSize: '12px' }}>✓</span>
+                                <span style={{ marginLeft: 'auto', fontSize: '12px', display: 'inline-flex' }}><Check size={14} strokeWidth={2.75} aria-label="Correct" /></span>
                               )}
                             </div>
                           )
@@ -2098,8 +2126,8 @@ function RoomDetailPage() {
                         borderRadius: '6px',
                         fontSize: '11px',
                         fontWeight: '600',
-                        background: (answerCounts[q._id] || 0) > 0 ? '#d1fae5' : '#fef3c7',
-                        color: (answerCounts[q._id] || 0) > 0 ? '#059669' : '#92400e'
+                        background: (answerCounts[q._id] || 0) > 0 ? 'var(--tint-success-bg)' : 'var(--tint-warn-bg)',
+                        color: (answerCounts[q._id] || 0) > 0 ? 'var(--tint-success-fg)' : 'var(--tint-warn-fg)'
                       }}>
                         {answerCounts[q._id] || 0}/{totalParticipants}
                       </span>
@@ -2126,7 +2154,7 @@ function RoomDetailPage() {
             {/* Leaderboard - flexible width */}
             <div style={{ flex: isMobile ? '1 1 100%' : '1 1 calc(30% - 10px)', minWidth: isMobile ? 0 : '280px', maxWidth: '100%', background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-md)', padding: '20px', boxSizing: 'border-box', overflow: 'hidden' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                <span style={{ fontSize: '20px' }}>🏆</span>
+                <span style={{ fontSize: '20px', display: 'inline-flex', color: '#f59e0b' }}><Trophy size={20} aria-hidden="true" /></span>
                 <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)' }}>
                   Leaderboard
                 </span>
@@ -2235,8 +2263,9 @@ function RoomDetailPage() {
             <div style={{
               fontSize: '48px',
               marginBottom: '16px',
-              animation: 'spin 1s linear infinite'
-            }}>⏳</div>
+              animation: 'spin 1s linear infinite',
+              display: 'inline-flex', color: 'var(--accent)'
+            }}><LoaderCircle size={48} aria-hidden="true" /></div>
             <h3 style={{
               margin: '0 0 8px',
               color: 'var(--text-primary)',

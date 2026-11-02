@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import useThemeStore from './stores/themeStore'
 import useAuthStore from './stores/authStore'
 import useSocketStore from './stores/socketStore'
@@ -17,8 +17,11 @@ import JoinRoomPage from './pages/JoinRoomPage'
 import RoomHistoryPage from './pages/RoomHistoryPage'
 import RoomResultsPage from './pages/RoomResultsPage'
 import ProfilePage from './pages/ProfilePage'
-import HelpPage from './pages/HelpPage'
+import HelpModal from './components/HelpModal'
+import Tour from './components/Tour'
 import AdminPage from './pages/AdminPage'
+import TermsPage from './pages/TermsPage'
+import TermsGate from './components/TermsGate'
 import { isTokenExpired } from './lib/jwt.js'
 
 function App() {
@@ -65,10 +68,16 @@ function App() {
 
   return (
     <BrowserRouter basename="/spandan">
+      {/* Mounted once for every page: the ⓘ help popup and the guided tour overlay (auto-starts per page). */}
+      <HelpModal />
+      <Tour />
+      {/* Blocking accept-terms screen for signed-in accounts that have not accepted the current terms. */}
+      <TermsGate />
       <Routes>
         <Route path="/" element={<AuthPage />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/terms" element={<TermsPage />} />
         <Route path="/teacher" element={
           <ProtectedRoute allowedRoles={['teacher']}>
             <DashboardPage />
@@ -104,11 +113,9 @@ function App() {
             <RoomResultsPage />
           </ProtectedRoute>
         } />
-        <Route path="/teacher/help" element={
-          <ProtectedRoute allowedRoles={['teacher']}>
-            <HelpPage />
-          </ProtectedRoute>
-        } />
+        {/* The old sidebar "Manual" pages are gone (help now lives in the ⓘ popup); keep bookmarks working. */}
+        <Route path="/teacher/help" element={<Navigate to="/teacher" replace />} />
+        <Route path="/student/help" element={<Navigate to="/student" replace />} />
         {/* Admin-only: teacher approval page. Guarded to teachers here and to isAdmin inside the page + API. */}
         <Route path="/admin" element={
           <ProtectedRoute allowedRoles={['teacher']}>
@@ -123,11 +130,6 @@ function App() {
         <Route path="/student/join-room" element={
           <ProtectedRoute allowedRoles={['student']}>
             <JoinRoomPage />
-          </ProtectedRoute>
-        } />
-        <Route path="/student/help" element={
-          <ProtectedRoute allowedRoles={['student']}>
-            <HelpPage />
           </ProtectedRoute>
         } />
         <Route path="/student/room-history" element={

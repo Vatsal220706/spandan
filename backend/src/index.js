@@ -11,8 +11,10 @@ import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
 import mongoose from 'mongoose'
 import { createAdapter } from '@socket.io/redis-adapter'
-import { RedisStore } from 'rate-limit-redis'
-import { initRedis } from './config/redis.js'
+import { FailoverStore } from './middleware/rateLimitStore.js'
+// isRedisReady (configured AND connected) guards the per-request Redis calls below: a disconnected
+// client queues commands, which would hang an answer submit until Redis returns.
+import { initRedis, isRedisReady } from './config/redis.js'
 import { canJoinRoom } from './services/roomJoinAuthz.js'
 import { computeRanked } from './services/leaderboardAgg.js'
 import { computeRankedIncremental, invalidateLeaderboardCache } from './services/leaderboardCache.js'
@@ -153,7 +155,7 @@ async function broadcastCounts(roomId) {
 
 async function scheduleCountsBroadcast(roomId) {
   const id = String(roomId)
-  if (redis.enabled) {
+  if (isRedisReady()) {
     try {
       const won = await redis.client.set(`live:cnt:sched:${id}`, INSTANCE_ID, { NX: true, PX: LIVE_THROTTLE_MS })
       if (won === 'OK') setTimeout(() => broadcastCounts(id), LIVE_THROTTLE_MS)
@@ -204,7 +206,7 @@ async function broadcastLeaderboard(roomId, { incremental = false } = {}) {
     // in anonymous mode — otherwise a student could read their position from the POST /responses reply
     // even though the leaderboard hides it. Same refresh cadence as the board, so it tracks a
     // mid-session toggle at the next fold, consistently across instances (shared Redis hash).
-    if (redis.enabled) {
+    if (isRedisReady()) {
       try {
         const flat = { _total: String(full.length), _anon: anonymous ? '1' : '0' }
         rankByStudent.forEach((rank, sid) => { flat[sid] = String(rank) })
@@ -289,7 +291,7 @@ async function refreshLeaderboardNow(roomId) {
 // may lag during an active burst (Option A — the student still gets their points immediately).
 async function getCachedStudentRank(roomId, studentId) {
   const id = String(roomId)
-  if (redis.enabled) {
+  if (isRedisReady()) {
     try {
       const [rank, total, anon] = await redis.client.hmGet(`live:ranks:${id}`, [String(studentId), '_total', '_anon'])
       const totalParticipants = total != null ? Number(total) : null
@@ -318,8 +320,9 @@ app.set('trust proxy', 1)
 
 // Rate limiting — shared across instances via Redis when enabled, else per-process memory.
 // A shared store is required for multi-instance so limits are global, not N-times looser.
+// FailoverStore counts in memory while Redis is down, so a Redis outage can't hang every request.
 const rlStore = (prefix) => redis.enabled
-  ? new RedisStore({ prefix, sendCommand: (...args) => redis.client.sendCommand(args) })
+  ? new FailoverStore({ prefix, client: redis.client })
   : undefined
 
 const apiLimiter = rateLimit({
@@ -413,7 +416,18 @@ const SOCKET_JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-p
 async function authenticateSocket(socket, token) {
   const decoded = jwt.verify(token, SOCKET_JWT_SECRET)
   const User = (await import('./models/User.js')).default
-  const u = await User.findById(decoded.userId).select('role').lean()
+  const u = await User.findById(decoded.userId).select('role termsVersion').lean()
+  // Same Terms of Use gate as HTTP authenticate(): an account that has not accepted the current terms
+  // stays unauthenticated (cannot join rooms or receive polls) until it accepts and re-authenticates.
+  const { hasAcceptedCurrentTerms } = await import('./config/terms.js')
+  if (u && !hasAcceptedCurrentTerms(u)) {
+    socket.data.userId = null
+    socket.data.role = null
+    connectedUsers.delete(socket.id)
+    const e = new Error('Terms not accepted')
+    e.code = 'TERMS_REQUIRED'
+    throw e
+  }
   socket.data.userId = decoded.userId
   socket.data.role = u?.role || null
   socket.data.tokenExp = decoded.exp || null // seconds since epoch; used to enforce freshness below
@@ -549,6 +563,8 @@ io.on('connection', (socket) => {
     } catch (error) {
       if (error.name === 'TokenExpiredError') {
         socket.emit('authenticated', { success: false, error: 'Token expired', expired: true })
+      } else if (error.code === 'TERMS_REQUIRED') {
+        socket.emit('authenticated', { success: false, error: 'Terms not accepted', termsRequired: true })
       } else {
         socket.emit('authenticated', { success: false, error: 'Invalid token' })
       }
@@ -713,6 +729,14 @@ io.on('connection', (socket) => {
     if (!(await verifyRoomOwner(socket, data?.roomCode))) return
     videoPaused.set(data.roomCode, false)
     socket.to(data.roomCode).emit('video:resume')
+  })
+
+  // A GENERATED batch reached the teacher's review popup (auto segment or Paste & Generate; Create Q
+  // never sends this) → every student in the room gets a one-off "question time" cue. No payload, no
+  // state: late joiners are not replayed this (they see the paused video / current question instead).
+  socket.on('questions:ready', async (data) => {
+    if (!(await verifyRoomOwner(socket, data?.roomCode))) return
+    socket.to(data.roomCode).emit('questions:ready')
   })
 
   socket.on('disconnect', () => {
